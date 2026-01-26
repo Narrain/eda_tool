@@ -1,5 +1,5 @@
-// path: src/frontend/symbol_table.hpp
-#pragma once
+#ifndef __SYMBOL_TABLE_HPP__
+#define __SYMBOL_TABLE_HPP__
 
 #include <string>
 #include <unordered_map>
@@ -64,3 +64,5 @@ private:
 };
 
 } // namespace sv
+
+#endif // __SYMBOL_TABLE_HPP__

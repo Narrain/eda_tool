@@ -1,4 +1,3 @@
-// path: src/frontend/lexer.cpp
 #include <cctype>
 #include <string>
 #include <vector>
@@ -8,20 +7,6 @@
 #include "ast.hpp"
 
 namespace sv {
-
-enum class TokenKind {
-    Identifier,
-    Number,
-    Symbol,
-    Keyword,
-    EndOfFile
-};
-
-struct Token {
-    TokenKind kind;
-    std::string text;
-    SourceLocation loc;
-};
 
 class Lexer {
 public:
@@ -37,9 +22,9 @@ public:
                 break;
             }
             char c = peek();
-            if (isalpha(c) || c == '_' || c == '$') {
+            if (isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '$') {
                 tokens.push_back(lexIdentifierOrKeyword());
-            } else if (isdigit(c)) {
+            } else if (isdigit(static_cast<unsigned char>(c))) {
                 tokens.push_back(lexNumber());
             } else {
                 tokens.push_back(lexSymbol());
@@ -79,12 +64,10 @@ private:
             if (c == '/' && pos_ + 1 < input_.size()) {
                 char n = input_[pos_ + 1];
                 if (n == '/') {
-                    // line comment
                     get(); get();
                     while (!eof() && peek() != '\n') get();
                     continue;
                 } else if (n == '*') {
-                    // block comment
                     get(); get();
                     while (!eof()) {
                         char d = get();
@@ -155,7 +138,6 @@ private:
         char c = get();
         std::string s(1, c);
 
-        // multi-char operators
         if (!eof()) {
             char n = peek();
             if ((c == '=' && n == '=') ||

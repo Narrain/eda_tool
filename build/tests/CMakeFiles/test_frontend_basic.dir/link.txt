@@ -1,1 +1,0 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/test_frontend_basic.dir/link.d CMakeFiles/test_frontend_basic.dir/frontend/unit/test_frontend_basic.cpp.o -o test_frontend_basic  ../src/libfrontend.a

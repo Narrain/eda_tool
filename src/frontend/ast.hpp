@@ -1,5 +1,5 @@
-// path: src/frontend/ast.hpp
-#pragma once
+#ifndef __AST_HPP__
+#define __AST_HPP__
 
 #include <memory>
 #include <string>
@@ -9,32 +9,43 @@
 
 namespace sv {
 
-// Forward declarations
-struct Expression;
-struct Statement;
-struct ModuleItem;
-struct PortDecl;
-struct NetDecl;
-struct VarDecl;
-struct ParamDecl;
-struct ContinuousAssign;
-struct AlwaysConstruct;
-struct ModuleDecl;
+// -----------------------------------------------------
+// Lexical layer: tokens shared by lexer and parser
+// -----------------------------------------------------
 
-// Basic source location
 struct SourceLocation {
     std::string file;
     int line = 0;
     int column = 0;
 };
 
-// Base node
+enum class TokenKind {
+    Identifier,
+    Number,
+    Symbol,
+    Keyword,
+    EndOfFile
+};
+
+struct Token {
+    TokenKind kind;
+    std::string text;
+    SourceLocation loc;
+};
+
+// -----------------------------------------------------
+// AST base
+// -----------------------------------------------------
+
 struct Node {
     SourceLocation loc;
     virtual ~Node() = default;
 };
 
+// -----------------------------------------------------
 // Expressions
+// -----------------------------------------------------
+
 enum class ExprKind {
     Identifier,
     Number,
@@ -91,20 +102,20 @@ struct Expression : Node {
     std::unique_ptr<Expression> then_expr;
     std::unique_ptr<Expression> else_expr;
 
-    Expression(ExprKind k) : kind(k) {}
+    explicit Expression(ExprKind k) : kind(k) {}
 };
 
+// -----------------------------------------------------
 // Statements
+// -----------------------------------------------------
+
 enum class StmtKind {
     Null,
     Block,
     If,
-    Case, // reserved for future
     Assign,
     NonBlockingAssign,
-    BlockingAssign,
-    DelayControl,
-    EventControl
+    BlockingAssign
 };
 
 struct Statement : Node {
@@ -122,10 +133,13 @@ struct Statement : Node {
     std::unique_ptr<Expression> lhs;
     std::unique_ptr<Expression> rhs;
 
-    Statement(StmtKind k) : kind(k) {}
+    explicit Statement(StmtKind k) : kind(k) {}
 };
 
-// Ports and declarations
+// -----------------------------------------------------
+// Types, ports, declarations
+// -----------------------------------------------------
+
 enum class PortDirection {
     Input,
     Output,
@@ -175,6 +189,10 @@ struct ContinuousAssign : Node {
     std::unique_ptr<Expression> rhs;
 };
 
+// -----------------------------------------------------
+// Always constructs
+// -----------------------------------------------------
+
 enum class AlwaysKind {
     Always,
     AlwaysFF,
@@ -194,7 +212,10 @@ struct AlwaysConstruct : Node {
     std::unique_ptr<Statement> body;
 };
 
-// Module items
+// -----------------------------------------------------
+// Module items and modules
+// -----------------------------------------------------
+
 enum class ModuleItemKind {
     NetDecl,
     VarDecl,
@@ -224,7 +245,7 @@ struct ModuleItem : Node {
     std::unique_ptr<AlwaysConstruct> always;
     std::unique_ptr<Instance> instance;
 
-    ModuleItem(ModuleItemKind k) : kind(k) {}
+    explicit ModuleItem(ModuleItemKind k) : kind(k) {}
 };
 
 struct ModuleDecl : Node {
@@ -233,9 +254,14 @@ struct ModuleDecl : Node {
     std::vector<std::unique_ptr<ModuleItem>> items;
 };
 
+// -----------------------------------------------------
 // Design root
+// -----------------------------------------------------
+
 struct Design : Node {
     std::vector<std::unique_ptr<ModuleDecl>> modules;
 };
 
 } // namespace sv
+
+#endif // __AST_HPP__

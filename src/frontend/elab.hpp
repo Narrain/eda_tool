@@ -1,5 +1,5 @@
-// path: src/frontend/elab.hpp
-#pragma once
+#ifndef __ELAB_HPP__
+#define __ELAB_HPP__
 
 #include <string>
 #include <vector>
@@ -56,3 +56,6 @@ private:
 };
 
 } // namespace sv
+
+
+#endif // __ELAB_HPP__
