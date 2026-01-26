@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/test_frontend_negative.dir/link.d CMakeFiles/test_frontend_negative.dir/frontend/negative/test_frontend_negative.cpp.o -o test_frontend_negative  ../src/libfrontend.a

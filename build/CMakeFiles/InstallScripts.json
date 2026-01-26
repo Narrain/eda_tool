@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/narrain/Practice/Semiconductor/MyEDATool/Junk/verilog_toolchain/build/cmake_install.cmake",
+		"/home/narrain/Practice/Semiconductor/MyEDATool/Junk/verilog_toolchain/build/src/cmake_install.cmake",
+		"/home/narrain/Practice/Semiconductor/MyEDATool/Junk/verilog_toolchain/build/tests/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libfrontend.a CMakeFiles/frontend.dir/frontend/ast.cpp.o CMakeFiles/frontend.dir/frontend/lexer.cpp.o CMakeFiles/frontend.dir/frontend/parser.cpp.o CMakeFiles/frontend.dir/frontend/symbol_table.cpp.o CMakeFiles/frontend.dir/frontend/elab.cpp.o
+/usr/bin/ranlib libfrontend.a
