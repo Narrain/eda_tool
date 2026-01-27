@@ -34,3 +34,17 @@ add_library(synth
 
 target_include_directories(synth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(synth PUBLIC ir)
+
+add_library(dpi
+    dpi/dpi_shim.cpp
+)
+
+target_include_directories(dpi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(dpi PUBLIC sim ir)
+
+add_library(uvm
+    uvm/uvm_env.cpp
+)
+
+target_include_directories(uvm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(uvm PUBLIC dpi sim ir)

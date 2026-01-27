@@ -81,3 +81,15 @@ add_executable(test_synth_negative
 )
 target_link_libraries(test_synth_negative synth)
 add_test(NAME test_synth_negative COMMAND test_synth_negative)
+
+add_executable(test_dpi_basic
+    dpi/unit/test_dpi_basic.cpp
+)
+target_link_libraries(test_dpi_basic dpi)
+add_test(NAME test_dpi_basic COMMAND test_dpi_basic)
+
+add_executable(test_uvm_smoke
+    uvm/unit/test_uvm_smoke.cpp
+)
+target_link_libraries(test_uvm_smoke uvm)
+add_test(NAME test_uvm_smoke COMMAND test_uvm_smoke)
