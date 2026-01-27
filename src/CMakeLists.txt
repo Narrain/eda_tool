@@ -25,3 +25,12 @@ add_library(sim
 
 target_include_directories(sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sim PUBLIC ir)
+
+add_library(synth
+    synth/netlist.cpp
+    synth/techmap.cpp
+    synth/synth_driver.cpp
+)
+
+target_include_directories(synth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(synth PUBLIC ir)

@@ -63,3 +63,21 @@ add_executable(test_sim_regression
 )
 target_link_libraries(test_sim_regression sim)
 add_test(NAME test_sim_regression COMMAND test_sim_regression)
+
+add_executable(test_synth_basic
+    synth/unit/test_synth_basic.cpp
+)
+target_link_libraries(test_synth_basic synth)
+add_test(NAME test_synth_basic COMMAND test_synth_basic)
+
+add_executable(test_synth_regression
+    synth/regression/test_synth_regression.cpp
+)
+target_link_libraries(test_synth_regression synth)
+add_test(NAME test_synth_regression COMMAND test_synth_regression)
+
+add_executable(test_synth_negative
+    synth/negative/test_synth_negative.cpp
+)
+target_link_libraries(test_synth_negative synth)
+add_test(NAME test_synth_negative COMMAND test_synth_negative)
