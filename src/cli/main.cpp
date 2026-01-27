@@ -1,5 +1,6 @@
-// path: src/cli/main.cpp
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "../frontend/ast.hpp"
@@ -23,42 +24,116 @@ int main(int argc, char **argv) {
     }
 
     std::string filename = argv[1];
-    // Minimal stub: no real file IO, just demonstrate pipeline wiring.
 
-    Design design;
-    auto mod = std::make_unique<ModuleDecl>();
-    mod->name = "top";
-    design.modules.push_back(std::move(mod));
+    // -----------------------------
+    // Read source file
+    // -----------------------------
+    std::ifstream in(filename);
+    if (!in) {
+        std::cerr << "Error: cannot open " << filename << "\n";
+        return 1;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    std::string source = buffer.str();
 
+    // -----------------------------
+    // Frontend: lex + parse
+    // -----------------------------
+    Lexer lex(filename, source);
+    std::vector<Token> tokens;
+    try {
+        tokens = lex.lex();
+    } catch (const std::exception &e) {
+        std::cerr << "Lex error: " << e.what() << "\n";
+        return 1;
+    }
+
+    Parser parser(tokens);
+    std::unique_ptr<Design> design;
+    try {
+        design = parser.parseDesign();
+    } catch (const std::exception &e) {
+        std::cerr << "Parse error: " << e.what() << "\n";
+        return 1;
+    }
+
+    if (!design) {
+        std::cerr << "No design parsed.\n";
+        return 1;
+    }
+
+    // -----------------------------
+    // Elaboration
+    // -----------------------------
     SymbolTable symtab;
-    symtab.build(design);
+    symtab.build(*design);
 
-    Elaborator elab(design, symtab);
-    auto ed = elab.elaborate();
+    Elaborator elab(*design, symtab);
+    ElaboratedDesign ed;
+    try {
+        ed = elab.elaborate();
+    } catch (const std::exception &e) {
+        std::cerr << "Elab error: " << e.what() << "\n";
+        return 1;
+    }
 
-    IRBuilder irb(design, ed, symtab);
+    // -----------------------------
+    // IR build
+    // -----------------------------
+    IRBuilder irb(*design, ed, symtab);
     RtlDesign rd = irb.build();
 
+    // -----------------------------
+    // Synthesis
+    // -----------------------------
     SynthDriver sd(rd);
     NetlistDesign nd = sd.run();
-    (void)nd;
+    (void)nd; // not printed yet
 
+    // -----------------------------
+    // Simulation + VCD
+    // -----------------------------
     Kernel k;
     k.load_design(&rd);
 
     VcdWriter vcd("wave.vcd");
-    k.set_vcd(&vcd);
+    if (vcd.good()) {
+        k.set_vcd(&vcd);
+    }
 
+    // -----------------------------
+    // Coverage
+    // -----------------------------
     CoverageDB cov;
-    auto &cp = cov.coverpoint("dummy");
+    auto &cp = cov.coverpoint("top_dummy");
     cp.sample(0);
 
+    // -----------------------------
+    // SVA
+    // -----------------------------
     SvaEngine sva;
-    sva.add_property(SvaProperty("always_true", [](const Kernel &) { return true; }));
+    sva.add_property(SvaProperty("always_true", [](const Kernel &) {
+        return true;
+    }));
 
+    // Run a small simulation window
     k.run(10);
-    bool ok = sva.check_all(k);
 
-    std::cout << "Simulation finished, SVA: " << (ok ? "PASS" : "FAIL") << "\n";
-    return ok ? 0 : 2;
+    bool sva_ok = sva.check_all(k);
+
+    // -----------------------------
+    // Coverage summary
+    // -----------------------------
+    std::cout << "Coverage:\n";
+    for (const auto &kv : cov.all()) {
+        const auto &cp_ref = kv.second;
+        std::cout << "  coverpoint " << cp_ref.name()
+                  << " total=" << cp_ref.total() << "\n";
+    }
+
+    std::cout << "SVA: " << (sva_ok ? "PASS" : "FAIL") << "\n";
+    std::cout << "VCD written to wave.vcd (if VCD file opened successfully)\n";
+
+    return sva_ok ? 0 : 2;
 }

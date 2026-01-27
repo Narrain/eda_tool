@@ -3,13 +3,15 @@
 
 #include <vector>
 #include <memory>
+#include <string>
 #include "ast.hpp"
 
 namespace sv {
 
 class Parser {
 public:
-    Parser(const std::vector<Token> &tokens);
+    explicit Parser(const std::vector<Token> &tokens);
+
     std::unique_ptr<Design> parseDesign();
 
 private:

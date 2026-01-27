@@ -1,5 +1,7 @@
 add_library(frontend
     frontend/ast.cpp
+    frontend/lexer.hpp
+    frontend/parser.hpp
     frontend/lexer.cpp
     frontend/parser.cpp
     frontend/symbol_table.cpp
