@@ -93,3 +93,15 @@ add_executable(test_uvm_smoke
 )
 target_link_libraries(test_uvm_smoke uvm)
 add_test(NAME test_uvm_smoke COMMAND test_uvm_smoke)
+
+add_executable(test_coverage_basic
+    coverage/unit/test_coverage_basic.cpp
+)
+target_link_libraries(test_coverage_basic coverage)
+add_test(NAME test_coverage_basic COMMAND test_coverage_basic)
+
+add_executable(test_sva_basic
+    sva/unit/test_sva_basic.cpp
+)
+target_link_libraries(test_sva_basic sva sim)
+add_test(NAME test_sva_basic COMMAND test_sva_basic)

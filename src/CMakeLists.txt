@@ -48,3 +48,29 @@ add_library(uvm
 
 target_include_directories(uvm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(uvm PUBLIC dpi sim ir)
+
+add_library(coverage
+    coverage/coverage.cpp
+)
+
+target_include_directories(coverage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(sva
+    sva/sva_engine.cpp
+)
+
+target_include_directories(sva PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sva PUBLIC sim)
+
+add_executable(svtool
+    cli/main.cpp
+)
+
+target_link_libraries(svtool
+    frontend
+    ir
+    sim
+    synth
+    coverage
+    sva
+)
