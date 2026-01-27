@@ -15,3 +15,13 @@ add_library(ir
 
 target_include_directories(ir PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ir PUBLIC frontend)
+
+add_library(sim
+    sim/value.cpp
+    sim/process.cpp
+    sim/vcd_writer.cpp
+    sim/kernel.cpp
+)
+
+target_include_directories(sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sim PUBLIC ir)

@@ -45,3 +45,21 @@ add_executable(test_ir_negative
 )
 target_link_libraries(test_ir_negative frontend ir)
 add_test(NAME test_ir_negative COMMAND test_ir_negative)
+
+add_executable(test_sim_value
+    sim/unit/test_sim_value.cpp
+)
+target_link_libraries(test_sim_value sim)
+add_test(NAME test_sim_value COMMAND test_sim_value)
+
+add_executable(test_sim_kernel_basic
+    sim/unit/test_sim_kernel_basic.cpp
+)
+target_link_libraries(test_sim_kernel_basic sim)
+add_test(NAME test_sim_kernel_basic COMMAND test_sim_kernel_basic)
+
+add_executable(test_sim_regression
+    sim/regression/test_sim_regression.cpp
+)
+target_link_libraries(test_sim_regression sim)
+add_test(NAME test_sim_regression COMMAND test_sim_regression)
