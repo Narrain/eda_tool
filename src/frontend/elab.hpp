@@ -19,7 +19,9 @@ struct ElabNet {
 
 struct ElabParam {
     std::string name;
-    std::string value_str; // simple textual value for now
+    std::string value_str;
+    bool has_int = false;
+    int64_t int_value = 0;
 };
 
 struct ElabInstance;

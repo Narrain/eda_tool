@@ -1,4 +1,5 @@
 // path: src/frontend/elab.cpp
+#include "const_eval.hpp"
 #include "elab.hpp"
 
 namespace sv {
@@ -15,15 +16,26 @@ void Elaborator::elaborateModule(const ModuleDecl &mod, ElaboratedDesign &out) {
     ElabModule em;
     em.name = mod.name;
 
+    ConstEval ce;
+
     // Parameters
     for (const auto &item : mod.items) {
         if (item->kind == ModuleItemKind::ParamDecl && item->param_decl) {
             ElabParam p;
             p.name = item->param_decl->name;
-            if (item->param_decl->value && item->param_decl->value->kind == ExprKind::Number) {
-                p.value_str = item->param_decl->value->literal;
+            if (item->param_decl->value) {
+                auto cv = ce.eval(*item->param_decl->value);
+                if (cv.valid) {
+                    p.has_int = true;
+                    p.int_value = cv.value;
+                    p.value_str = std::to_string(cv.value);
+                } else if (item->param_decl->value->kind == ExprKind::Number) {
+                    p.value_str = item->param_decl->value->literal;
+                } else {
+                    p.value_str = "<expr>";
+                }
             } else {
-                p.value_str = "<expr>";
+                p.value_str = "<unset>";
             }
             em.params.push_back(std::move(p));
         }

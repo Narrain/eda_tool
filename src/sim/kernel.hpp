@@ -73,8 +73,12 @@ private:
     // Internal: processes we build from RTL (to keep lambdas alive)
     std::vector<Process> rtl_processes_;
 
-    // signal -> processes that depend on it
-    std::unordered_map<std::string, std::vector<Process*>> watchers_;
+    // Level-sensitive watchers: @a, @(a or b), @(*), always_comb
+    std::unordered_map<std::string, std::vector<Process*>> level_watchers_;
+
+    // Edge-sensitive watchers: @(posedge clk), @(negedge rst)
+    std::unordered_map<std::string, std::vector<Process*>> posedge_watchers_;
+    std::unordered_map<std::string, std::vector<Process*>> negedge_watchers_;
 
     void run_active_region(uint64_t target_time);
     void run_nba_region();
@@ -91,7 +95,9 @@ private:
     void drive_signal(const std::string &name, const Value &v, bool nba);
 
     // Dependency registration
-    void register_dependency(const std::string &sig, Process *p);
+    void register_level_dependency(const std::string &sig, Process *p);
+    void register_posedge_dependency(const std::string &sig, Process *p);
+    void register_negedge_dependency(const std::string &sig, Process *p);
     void register_expr_dependencies(const RtlExpr &e, Process *p);
 };
 

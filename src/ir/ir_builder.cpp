@@ -56,14 +56,44 @@ void IRBuilder::collectNets(const ModuleDecl &mod, RtlModule &out) {
             n.name = item->net_decl->name;
             n.type = item->net_decl->type;
             out.nets.push_back(std::move(n));
+
+            // Declaration initializer → Initial process
+            if (item->net_decl->init) {
+                RtlProcess p;
+                p.kind = RtlProcessKind::Initial;
+
+                RtlAssign a;
+                a.kind = RtlAssignKind::Blocking;
+                a.lhs_name = item->net_decl->name;
+                a.rhs = lowerExpr(*item->net_decl->init);
+
+                p.assigns.push_back(std::move(a));
+                out.processes.push_back(std::move(p));
+            }
+
         } else if (item->kind == ModuleItemKind::VarDecl && item->var_decl) {
             RtlNet n;
             n.name = item->var_decl->name;
             n.type = item->var_decl->type;
             out.nets.push_back(std::move(n));
+
+            // Declaration initializer → Initial process
+            if (item->var_decl->init) {
+                RtlProcess p;
+                p.kind = RtlProcessKind::Initial;
+
+                RtlAssign a;
+                a.kind = RtlAssignKind::Blocking;
+                a.lhs_name = item->var_decl->name;
+                a.rhs = lowerExpr(*item->var_decl->init);
+
+                p.assigns.push_back(std::move(a));
+                out.processes.push_back(std::move(p));
+            }
         }
     }
 }
+
 
 void IRBuilder::collectContinuousAssigns(const ModuleDecl &mod, RtlModule &out) {
     for (const auto &item : mod.items) {
@@ -86,86 +116,151 @@ void IRBuilder::collectContinuousAssigns(const ModuleDecl &mod, RtlModule &out) 
 
 void IRBuilder::collectProcesses(const ModuleDecl &mod, RtlModule &out) {
     for (const auto &item : mod.items) {
+
+        // -------------------------
+        // Always constructs
+        // -------------------------
         if (item->kind == ModuleItemKind::Always && item->always) {
+            const auto &ac = *item->always;
 
             RtlProcess p;
             p.kind = RtlProcessKind::Always;
 
-            // -----------------------------
-            // 1. Extract sensitivity list
-            // -----------------------------
-            const auto &alist = item->always->sensitivity_list;
+            // 1) Sensitivity list
+            const auto &alist = ac.sensitivity_list;
 
-            // Case A: explicit @(...)
             if (!alist.empty()) {
                 for (const auto &si : alist) {
 
                     // @* or @(*)
                     if (si.star) {
                         // leave p.sensitivity_signals empty
-                        // kernel will treat empty as "combinational"
+                        // kernel will infer from RHS
                         continue;
                     }
 
-                    // posedge/negedge <expr>
-                    if (si.expr) {
-                        if (si.expr->kind == ExprKind::Identifier) {
-                            p.sensitivity_signals.push_back(si.expr->ident);
+                    if (!si.expr) continue;
+
+                    // Identifier: @a, @(posedge a), @(negedge a)
+                    if (si.expr->kind == ExprKind::Identifier) {
+                        const std::string &name = si.expr->ident;
+
+                        if (si.posedge) {
+                            // edge-sensitive: handled in kernel via posedge_watchers_
+                            // we still record as level sensitivity for now
+                            p.sensitivity_signals.push_back(name);
+                        } else if (si.negedge) {
+                            p.sensitivity_signals.push_back(name);
+                        } else {
+                            // level-sensitive @a
+                            p.sensitivity_signals.push_back(name);
                         }
-                        else if (si.expr->kind == ExprKind::Binary) {
-                            // handle @(a or b)
-                            // flatten @(a or b or c)
-                            auto walk_or = [&](const Expression *e, const auto &self_ref) -> void {
-                                if (!e) return;
-
-                                if (e->kind == ExprKind::Identifier) {
-                                    p.sensitivity_signals.push_back(e->ident);
-                                    return;
-                                }
-
-                                if (e->kind == ExprKind::Binary &&
-                                    e->binary_op == BinaryOp::LogicalOr) {
-                                    self_ref(e->lhs.get(), self_ref);
-                                    self_ref(e->rhs.get(), self_ref);
-                                    return;
-                                }
-
-                                // fallback: ignore non-identifiers
-                            };
-
-                            // call it
-                            walk_or(si.expr.get(), walk_or);
-
-                        }
+                        continue;
                     }
+
+                    // OR-chain: @(a or b or c)
+                    if (si.expr->kind == ExprKind::Binary &&
+                        si.expr->binary_op == BinaryOp::LogicalOr &&
+                        !si.posedge && !si.negedge) {
+
+                        auto walk_or = [&](const Expression *e,
+                                           const auto &self_ref) -> void {
+                            if (!e) return;
+
+                            if (e->kind == ExprKind::Identifier) {
+                                p.sensitivity_signals.push_back(e->ident);
+                                return;
+                            }
+
+                            if (e->kind == ExprKind::Binary &&
+                                e->binary_op == BinaryOp::LogicalOr) {
+                                self_ref(e->lhs.get(), self_ref);
+                                self_ref(e->rhs.get(), self_ref);
+                                return;
+                            }
+                        };
+
+                        walk_or(si.expr.get(), walk_or);
+                        continue;
+                    }
+
+                    // other forms ignored for now
                 }
+            } else if (ac.kind == AlwaysKind::AlwaysComb) {
+                // always_comb with no explicit list => @(*)
+                // leave p.sensitivity_signals empty; kernel uses RHS deps
             }
-            // Case B: always_comb → treat as @(*)
-            else if (item->always->kind == AlwaysKind::AlwaysComb) {
-                // leave empty → kernel treats as combinational
-            }
-            // Case C: plain always @* (parser sets star=true)
-            // already handled above
 
-            // -----------------------------
-            // 2. Flatten assignments
-            // -----------------------------
-            if (item->always->body) {
-                const Statement &body = *item->always->body;
+            // 2) Body flattening with semantics:
+            //    - always_comb => blocking
+            //    - always_ff   => nonblocking
+            //    - plain always => as written
 
+            auto lower_body = [&](const Statement &body, RtlAssignKind default_kind) {
                 if (body.kind == StmtKind::BlockingAssign) {
                     p.assigns.push_back(lowerAssign(body, RtlAssignKind::Blocking));
-                }
-                else if (body.kind == StmtKind::NonBlockingAssign) {
+                } else if (body.kind == StmtKind::NonBlockingAssign) {
                     p.assigns.push_back(lowerAssign(body, RtlAssignKind::NonBlocking));
-                }
-                else if (body.kind == StmtKind::Block) {
+                } else if (body.kind == StmtKind::Block) {
                     for (const auto &s : body.block_stmts) {
                         if (!s) continue;
                         if (s->kind == StmtKind::BlockingAssign) {
                             p.assigns.push_back(lowerAssign(*s, RtlAssignKind::Blocking));
+                        } else if (s->kind == StmtKind::NonBlockingAssign) {
+                            p.assigns.push_back(lowerAssign(*s, RtlAssignKind::NonBlocking));
                         }
-                        else if (s->kind == StmtKind::NonBlockingAssign) {
+                    }
+                }
+            };
+
+            if (ac.body) {
+                const Statement &body = *ac.body;
+
+                switch (ac.kind) {
+                case AlwaysKind::AlwaysComb:
+                    // force blocking semantics
+                    lower_body(body, RtlAssignKind::Blocking);
+                    break;
+
+                case AlwaysKind::AlwaysFF:
+                    // force nonblocking semantics
+                    lower_body(body, RtlAssignKind::NonBlocking);
+                    break;
+
+                case AlwaysKind::Always:
+                case AlwaysKind::AlwaysLatch:
+                default:
+                    // as written
+                    lower_body(body, RtlAssignKind::Blocking);
+                    break;
+                }
+            }
+
+            out.processes.push_back(std::move(p));
+        }
+
+        // -------------------------
+        // Initial constructs
+        // -------------------------
+        else if (item->kind == ModuleItemKind::Initial && item->initial) {
+            const auto &ic = *item->initial;
+
+            RtlProcess p;
+            p.kind = RtlProcessKind::Initial;
+
+            if (ic.body) {
+                const Statement &body = *ic.body;
+
+                if (body.kind == StmtKind::BlockingAssign) {
+                    p.assigns.push_back(lowerAssign(body, RtlAssignKind::Blocking));
+                } else if (body.kind == StmtKind::NonBlockingAssign) {
+                    p.assigns.push_back(lowerAssign(body, RtlAssignKind::NonBlocking));
+                } else if (body.kind == StmtKind::Block) {
+                    for (const auto &s : body.block_stmts) {
+                        if (!s) continue;
+                        if (s->kind == StmtKind::BlockingAssign) {
+                            p.assigns.push_back(lowerAssign(*s, RtlAssignKind::Blocking));
+                        } else if (s->kind == StmtKind::NonBlockingAssign) {
                             p.assigns.push_back(lowerAssign(*s, RtlAssignKind::NonBlocking));
                         }
                     }

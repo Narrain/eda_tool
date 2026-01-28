@@ -57,7 +57,6 @@ void Kernel::run(uint64_t max_time) {
         run_active_region(cur_time_);
         run_nba_region();
 
-        // dump again after processes have run
         if (vcd_) {
             vcd_->dump_time(cur_time_);
             for (const auto &kv : signals_) {
@@ -77,7 +76,9 @@ void Kernel::load_design(const RtlDesign *design) {
     rtl_processes_.clear();
     while (!pq_.empty()) pq_.pop();
     nba_queue_.clear();
-    watchers_.clear();
+    level_watchers_.clear();
+    posedge_watchers_.clear();
+    negedge_watchers_.clear();
 
     if (!design_) return;
 
@@ -102,10 +103,19 @@ void Kernel::load_design(const RtlDesign *design) {
 void Kernel::init_signals_from_rtl() {
     if (!design_) return;
 
+    auto width_from_type = [](const DataType &t) -> std::size_t {
+        if (t.is_packed && t.msb >= 0 && t.lsb >= 0) {
+            int w = (t.msb >= t.lsb) ? (t.msb - t.lsb + 1)
+                                     : (t.lsb - t.msb + 1);
+            return static_cast<std::size_t>(w);
+        }
+        // scalar logic/reg/wire/integer
+        return 1;
+    };
+
     for (const auto &mod : design_->modules) {
         for (const auto &net : mod.nets) {
-            // For now, treat all nets as 1-bit until we wire a proper width helper.
-            std::size_t width = 1;
+            std::size_t width = width_from_type(net.type);
             signals_[net.name] = Value(width, Logic4::LX);
             if (vcd_) {
                 vcd_->add_signal(net.name, width);
@@ -118,17 +128,15 @@ void Kernel::init_signals_from_rtl() {
     }
 }
 
+
 void Kernel::build_processes_from_rtl() {
     if (!design_) return;
 
     for (const auto &mod : design_->modules) {
 
-        // -------------------------
-        // Continuous assigns
-        // -------------------------
+        // Continuous assigns as combinational processes
         for (const auto &a : mod.continuous_assigns) {
             if (!a.rhs) continue;
-
             RtlExpr rhs_copy = *a.rhs;
             std::string lhs_name = a.lhs_name;
 
@@ -144,10 +152,10 @@ void Kernel::build_processes_from_rtl() {
             register_expr_dependencies(*a.rhs, pp);
         }
 
-        // -------------------------
-        // Always blocks
-        // -------------------------
+        // Always / Initial processes
         for (const auto &p : mod.processes) {
+
+            // Flattened assigns already in p.assigns
             for (const auto &a : p.assigns) {
                 if (!a.rhs) continue;
 
@@ -155,32 +163,41 @@ void Kernel::build_processes_from_rtl() {
                 std::string lhs_name = a.lhs_name;
                 RtlAssignKind kind = a.kind;
 
+                // always_comb → force blocking, Active
+                // always_ff   → force nonblocking, NBA
+                bool is_ff = (p.kind == RtlProcessKind::Always); // we rely on IRBuilder to tag ff/comb via kind+assign kind
+                bool nba = (kind == RtlAssignKind::NonBlocking);
+
+                SchedRegion region =
+                    nba ? SchedRegion::NBA : SchedRegion::Active;
+
                 rtl_processes_.emplace_back(
-                    [this, lhs_name, rhs_copy, kind](Kernel &k) {
+                    [this, lhs_name, rhs_copy, nba](Kernel &k) {
                         Value v = k.eval_expr(rhs_copy);
-                        bool nba = (kind == RtlAssignKind::NonBlocking);
                         k.drive_signal(lhs_name, v, nba);
                     },
-                    (kind == RtlAssignKind::NonBlocking)
-                        ? SchedRegion::NBA
-                        : SchedRegion::Active
+                    region
                 );
 
                 Process *pp = &rtl_processes_.back();
 
-                // explicit sensitivity list (future use)
-                for (const auto &sig : p.sensitivity_signals) {
-                    register_dependency(sig, pp);
+                // Initial processes: no sensitivity, run once at time 0
+                if (p.kind == RtlProcessKind::Initial) {
+                    // do not register any dependencies
+                    continue;
                 }
 
-                // combinational dependency from RHS
+                // Level-sensitive sensitivity list (from IRBuilder)
+                for (const auto &sig : p.sensitivity_signals) {
+                    register_level_dependency(sig, pp);
+                }
+
+                // Combinational dependency from RHS (for @* / always_comb)
                 register_expr_dependencies(*a.rhs, pp);
             }
         }
 
-        // -------------------------
         // Gate-level primitives
-        // -------------------------
         for (const auto &g : mod.gates) {
             RtlGate gate_copy = g;
 
@@ -211,7 +228,6 @@ void Kernel::build_processes_from_rtl() {
                     case RtlGateKind::Not:
                         out = logic_not(get_bit(gate_copy.inputs[0]));
                         break;
-
                     case RtlGateKind::Nand: {
                         Logic4 acc = Logic4::L1;
                         for (const auto &in : gate_copy.inputs)
@@ -254,7 +270,7 @@ void Kernel::build_processes_from_rtl() {
 
             Process *pp = &rtl_processes_.back();
             for (const auto &in : g.inputs)
-                register_dependency(in, pp);
+                register_level_dependency(in, pp);
         }
     }
 }
@@ -296,6 +312,15 @@ static uint64_t parse_simple_int_literal(const std::string &s) {
         if (c == '1') v |= 1;
     }
     return v;
+}
+
+static uint64_t value_to_uint(const Value &v) {
+    uint64_t res = 0;
+    std::size_t w = std::min<std::size_t>(v.width(), 64);
+    for (std::size_t i = 0; i < w; ++i) {
+        res |= (v.get(i) == Logic4::L1 ? (uint64_t(1) << i) : 0);
+    }
+    return res;
 }
 
 Value Kernel::eval_expr(const RtlExpr &e) {
@@ -364,8 +389,11 @@ Value Kernel::eval_expr(const RtlExpr &e) {
         case RtlUnOp::Plus:
             return op;
 
-        case RtlUnOp::Minus:
-            return Value(op.width(), Logic4::LX); // placeholder
+        case RtlUnOp::Minus: {
+            uint64_t u = value_to_uint(op);
+            uint64_t r = static_cast<uint64_t>(-static_cast<int64_t>(u));
+            return Value::from_uint(op.width(), r);
+        }
 
         case RtlUnOp::Not: {
             Logic4 acc = Logic4::L0;
@@ -396,20 +424,19 @@ Value Kernel::eval_expr(const RtlExpr &e) {
         Value rhs = eval_expr(*e.rhs);
 
         std::size_t width = std::max(lhs.width(), rhs.width());
+        if (width == 0) width = 1;
 
-        if (lhs.width() != width) {
+        auto extend = [width](Value v) {
+            if (v.width() == width) return v;
             Value tmp(width, Logic4::LX);
-            for (std::size_t i = 0; i < lhs.width(); ++i)
-                tmp.set(i, lhs.get(i));
-            lhs = std::move(tmp);
-        }
+            std::size_t minw = std::min(width, v.width());
+            for (std::size_t i = 0; i < minw; ++i)
+                tmp.set(i, v.get(i));
+            return tmp;
+        };
 
-        if (rhs.width() != width) {
-            Value tmp(width, Logic4::LX);
-            for (std::size_t i = 0; i < rhs.width(); ++i)
-                tmp.set(i, rhs.get(i));
-            rhs = std::move(tmp);
-        }
+        lhs = extend(lhs);
+        rhs = extend(rhs);
 
         Value out(width, Logic4::LX);
 
@@ -418,22 +445,98 @@ Value Kernel::eval_expr(const RtlExpr &e) {
                 out.set(i, fn(lhs.get(i), rhs.get(i)));
         };
 
+        uint64_t ul = value_to_uint(lhs);
+        uint64_t ur = value_to_uint(rhs);
+
         switch (e.bin_op) {
+        // arithmetic
+        case RtlBinOp::Add:
+            return Value::from_uint(width, ul + ur);
+        case RtlBinOp::Sub:
+            return Value::from_uint(width, ul - ur);
+        case RtlBinOp::Mul:
+            return Value::from_uint(width, ul * ur);
+        case RtlBinOp::Div:
+            return Value::from_uint(width, ur ? (ul / ur) : 0);
+        case RtlBinOp::Mod:
+            return Value::from_uint(width, ur ? (ul % ur) : 0);
+
+        // bitwise
         case RtlBinOp::And:
             apply_bitwise(logic_and);
             return out;
-
         case RtlBinOp::Or:
             apply_bitwise(logic_or);
             return out;
-
         case RtlBinOp::Xor:
             apply_bitwise(logic_xor);
             return out;
 
-        default:
-            return Value(width, Logic4::LX);
+        // logical
+        case RtlBinOp::LogicalAnd: {
+            bool res = (ul != 0) && (ur != 0);
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
         }
+        case RtlBinOp::LogicalOr: {
+            bool res = (ul != 0) || (ur != 0);
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
+        }
+
+        // comparisons (1-bit result)
+        case RtlBinOp::Eq:
+        case RtlBinOp::CaseEq: {
+            bool res = (ul == ur);
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
+        }
+        case RtlBinOp::Neq:
+        case RtlBinOp::CaseNeq: {
+            bool res = (ul != ur);
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
+        }
+        case RtlBinOp::Lt: {
+            bool res = (static_cast<int64_t>(ul) < static_cast<int64_t>(ur));
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
+        }
+        case RtlBinOp::Gt: {
+            bool res = (static_cast<int64_t>(ul) > static_cast<int64_t>(ur));
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
+        }
+        case RtlBinOp::Le: {
+            bool res = (static_cast<int64_t>(ul) <= static_cast<int64_t>(ur));
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
+        }
+        case RtlBinOp::Ge: {
+            bool res = (static_cast<int64_t>(ul) >= static_cast<int64_t>(ur));
+            Value v(1);
+            v.set(0, res ? Logic4::L1 : Logic4::L0);
+            return v;
+        }
+
+        // shifts
+        case RtlBinOp::Shl:
+            return Value::from_uint(width, ul << (ur & 63));
+        case RtlBinOp::Shr:
+        case RtlBinOp::Ashr:
+            return Value::from_uint(width, ul >> (ur & 63));
+        case RtlBinOp::Ashl:
+            return Value::from_uint(width, ul << (ur & 63));
+        }
+
+        return Value(width, Logic4::LX);
     }
     }
 
@@ -452,28 +555,75 @@ void Kernel::drive_signal(const std::string &name, const Value &v, bool nba) {
         return;
     }
 
+    // Old value (for edge detection)
+    Logic4 old_bit = Logic4::LX;
+    auto it_old = signals_.find(name);
+    if (it_old != signals_.end() && it_old->second.width() > 0) {
+        old_bit = it_old->second.get(0);
+    }
+
     // Immediate update
     signals_[name] = v;
 
-    // schedule dependent processes
-    auto it = watchers_.find(name);
-    if (it != watchers_.end()) {
-        for (Process *pp : it->second) {
+    Logic4 new_bit = Logic4::LX;
+    if (v.width() > 0) {
+        new_bit = v.get(0);
+    }
+
+    bool is_posedge = (old_bit == Logic4::L0 && new_bit == Logic4::L1);
+    bool is_negedge = (old_bit == Logic4::L1 && new_bit == Logic4::L0);
+
+    // Level-sensitive watchers
+    auto it_lvl = level_watchers_.find(name);
+    if (it_lvl != level_watchers_.end()) {
+        for (Process *pp : it_lvl->second) {
             if (!pp) continue;
             schedule(*pp, 0, pp->region());
         }
     }
+
+    // Posedge watchers
+    if (is_posedge) {
+        auto it_pe = posedge_watchers_.find(name);
+        if (it_pe != posedge_watchers_.end()) {
+            for (Process *pp : it_pe->second) {
+                if (!pp) continue;
+                schedule(*pp, 0, pp->region());
+            }
+        }
+    }
+
+    // Negedge watchers
+    if (is_negedge) {
+        auto it_ne = negedge_watchers_.find(name);
+        if (it_ne != negedge_watchers_.end()) {
+            for (Process *pp : it_ne->second) {
+                if (!pp) continue;
+                schedule(*pp, 0, pp->region());
+            }
+        }
+    }
 }
 
-void Kernel::register_dependency(const std::string &sig, Process *p) {
-    if (sig.empty()) return;
-    watchers_[sig].push_back(p);
+void Kernel::register_level_dependency(const std::string &sig, Process *p) {
+    if (sig.empty() || !p) return;
+    level_watchers_[sig].push_back(p);
+}
+
+void Kernel::register_posedge_dependency(const std::string &sig, Process *p) {
+    if (sig.empty() || !p) return;
+    posedge_watchers_[sig].push_back(p);
+}
+
+void Kernel::register_negedge_dependency(const std::string &sig, Process *p) {
+    if (sig.empty() || !p) return;
+    negedge_watchers_[sig].push_back(p);
 }
 
 void Kernel::register_expr_dependencies(const RtlExpr &e, Process *p) {
     switch (e.kind) {
     case RtlExprKind::Ref:
-        register_dependency(e.ref_name, p);
+        register_level_dependency(e.ref_name, p);
         break;
 
     case RtlExprKind::Unary:
