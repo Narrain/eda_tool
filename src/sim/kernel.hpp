@@ -73,6 +73,9 @@ private:
     // Internal: processes we build from RTL (to keep lambdas alive)
     std::vector<Process> rtl_processes_;
 
+    // signal -> processes that depend on it
+    std::unordered_map<std::string, std::vector<Process*>> watchers_;
+
     void run_active_region(uint64_t target_time);
     void run_nba_region();
 
@@ -86,6 +89,10 @@ private:
     // Helpers to read/write signals
     Value get_signal_value(const std::string &name, std::size_t width);
     void drive_signal(const std::string &name, const Value &v, bool nba);
+
+    // Dependency registration
+    void register_dependency(const std::string &sig, Process *p);
+    void register_expr_dependencies(const RtlExpr &e, Process *p);
 };
 
 } // namespace sv

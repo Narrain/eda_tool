@@ -87,36 +87,90 @@ void IRBuilder::collectContinuousAssigns(const ModuleDecl &mod, RtlModule &out) 
 void IRBuilder::collectProcesses(const ModuleDecl &mod, RtlModule &out) {
     for (const auto &item : mod.items) {
         if (item->kind == ModuleItemKind::Always && item->always) {
+
             RtlProcess p;
             p.kind = RtlProcessKind::Always;
 
-            // For now, flatten only top-level blocking/non-blocking assignments
+            // -----------------------------
+            // 1. Extract sensitivity list
+            // -----------------------------
+            const auto &alist = item->always->sensitivity_list;
+
+            // Case A: explicit @(...)
+            if (!alist.empty()) {
+                for (const auto &si : alist) {
+
+                    // @* or @(*)
+                    if (si.star) {
+                        // leave p.sensitivity_signals empty
+                        // kernel will treat empty as "combinational"
+                        continue;
+                    }
+
+                    // posedge/negedge <expr>
+                    if (si.expr) {
+                        if (si.expr->kind == ExprKind::Identifier) {
+                            p.sensitivity_signals.push_back(si.expr->ident);
+                        }
+                        else if (si.expr->kind == ExprKind::Binary) {
+                            // handle @(a or b)
+                            // flatten @(a or b or c)
+                            auto walk_or = [&](const Expression *e, const auto &self_ref) -> void {
+                                if (!e) return;
+
+                                if (e->kind == ExprKind::Identifier) {
+                                    p.sensitivity_signals.push_back(e->ident);
+                                    return;
+                                }
+
+                                if (e->kind == ExprKind::Binary &&
+                                    e->binary_op == BinaryOp::LogicalOr) {
+                                    self_ref(e->lhs.get(), self_ref);
+                                    self_ref(e->rhs.get(), self_ref);
+                                    return;
+                                }
+
+                                // fallback: ignore non-identifiers
+                            };
+
+                            // call it
+                            walk_or(si.expr.get(), walk_or);
+
+                        }
+                    }
+                }
+            }
+            // Case B: always_comb → treat as @(*)
+            else if (item->always->kind == AlwaysKind::AlwaysComb) {
+                // leave empty → kernel treats as combinational
+            }
+            // Case C: plain always @* (parser sets star=true)
+            // already handled above
+
+            // -----------------------------
+            // 2. Flatten assignments
+            // -----------------------------
             if (item->always->body) {
                 const Statement &body = *item->always->body;
+
                 if (body.kind == StmtKind::BlockingAssign) {
                     p.assigns.push_back(lowerAssign(body, RtlAssignKind::Blocking));
-                } else if (body.kind == StmtKind::NonBlockingAssign) {
+                }
+                else if (body.kind == StmtKind::NonBlockingAssign) {
                     p.assigns.push_back(lowerAssign(body, RtlAssignKind::NonBlocking));
-                } else if (body.kind == StmtKind::Block) {
+                }
+                else if (body.kind == StmtKind::Block) {
                     for (const auto &s : body.block_stmts) {
                         if (!s) continue;
                         if (s->kind == StmtKind::BlockingAssign) {
                             p.assigns.push_back(lowerAssign(*s, RtlAssignKind::Blocking));
-                        } else if (s->kind == StmtKind::NonBlockingAssign) {
+                        }
+                        else if (s->kind == StmtKind::NonBlockingAssign) {
                             p.assigns.push_back(lowerAssign(*s, RtlAssignKind::NonBlocking));
                         }
                     }
                 }
             }
-
-            // Sensitivity list extraction (for future kernel use).
-            // We keep it conservative for now: if the always has an explicit
-            // sensitivity list, we *could* walk item->always->sensitivity_list
-            // and collect identifiers from each expr. Until we wire that,
-            // leave sensitivity_signals empty and treat as combinational/clocked
-            // at the kernel level.
-            //
-            // p.sensitivity_signals = ... (to be filled when we hook kernel)
 
             out.processes.push_back(std::move(p));
         }
