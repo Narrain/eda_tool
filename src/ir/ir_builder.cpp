@@ -1,4 +1,3 @@
-// path: src/ir/ir_builder.cpp
 #include "ir_builder.hpp"
 
 namespace sv {
@@ -31,7 +30,8 @@ void IRBuilder::collectParams(const ModuleDecl &mod, RtlModule &out) {
             p.name = item->param_decl->name;
             if (item->param_decl->value &&
                 item->param_decl->value->kind == ExprKind::Number) {
-                p.value_str = item->param_decl->value->number_literal;
+                // new AST: use .literal instead of .number_literal
+                p.value_str = item->param_decl->value->literal;
             } else {
                 p.value_str = "<expr>";
             }
@@ -135,29 +135,44 @@ std::unique_ptr<RtlExpr> IRBuilder::lowerExpr(const Expression &e) {
     }
     case ExprKind::Number: {
         auto r = std::make_unique<RtlExpr>(RtlExprKind::Const);
-        r->const_literal = e.number_literal;
+        // new AST: .literal
+        r->const_literal = e.literal;
         return r;
     }
     case ExprKind::Binary: {
         auto r = std::make_unique<RtlExpr>(RtlExprKind::Binary);
         // map BinaryOp to RtlBinOp
         switch (e.binary_op) {
-        case BinaryOp::Add: r->bin_op = RtlBinOp::Add; break;
-        case BinaryOp::Sub: r->bin_op = RtlBinOp::Sub; break;
-        case BinaryOp::Mul: r->bin_op = RtlBinOp::Mul; break;
-        case BinaryOp::Div: r->bin_op = RtlBinOp::Div; break;
-        case BinaryOp::And: r->bin_op = RtlBinOp::And; break;
-        case BinaryOp::Or: r->bin_op = RtlBinOp::Or; break;
-        case BinaryOp::Xor: r->bin_op = RtlBinOp::Xor; break;
-        case BinaryOp::Eq: r->bin_op = RtlBinOp::Eq; break;
-        case BinaryOp::Neq: r->bin_op = RtlBinOp::Neq; break;
-        case BinaryOp::Lt: r->bin_op = RtlBinOp::Lt; break;
-        case BinaryOp::Gt: r->bin_op = RtlBinOp::Gt; break;
-        case BinaryOp::Le: r->bin_op = RtlBinOp::Le; break;
-        case BinaryOp::Ge: r->bin_op = RtlBinOp::Ge; break;
+        case BinaryOp::Add:        r->bin_op = RtlBinOp::Add;        break;
+        case BinaryOp::Sub:        r->bin_op = RtlBinOp::Sub;        break;
+        case BinaryOp::Mul:        r->bin_op = RtlBinOp::Mul;        break;
+        case BinaryOp::Div:        r->bin_op = RtlBinOp::Div;        break;
+        case BinaryOp::Mod:        r->bin_op = RtlBinOp::Mod;        break;
+
+        case BinaryOp::BitAnd:     r->bin_op = RtlBinOp::And;        break;
+        case BinaryOp::BitOr:      r->bin_op = RtlBinOp::Or;         break;
+        case BinaryOp::BitXor:     r->bin_op = RtlBinOp::Xor;        break;
+
         case BinaryOp::LogicalAnd: r->bin_op = RtlBinOp::LogicalAnd; break;
-        case BinaryOp::LogicalOr: r->bin_op = RtlBinOp::LogicalOr; break;
-        default: r->bin_op = RtlBinOp::Add; break;
+        case BinaryOp::LogicalOr:  r->bin_op = RtlBinOp::LogicalOr;  break;
+
+        case BinaryOp::Eq:         r->bin_op = RtlBinOp::Eq;         break;
+        case BinaryOp::Neq:        r->bin_op = RtlBinOp::Neq;        break;
+        case BinaryOp::CaseEq:     r->bin_op = RtlBinOp::CaseEq;     break;
+        case BinaryOp::CaseNeq:    r->bin_op = RtlBinOp::CaseNeq;    break;
+        case BinaryOp::Lt:         r->bin_op = RtlBinOp::Lt;         break;
+        case BinaryOp::Gt:         r->bin_op = RtlBinOp::Gt;         break;
+        case BinaryOp::Le:         r->bin_op = RtlBinOp::Le;         break;
+        case BinaryOp::Ge:         r->bin_op = RtlBinOp::Ge;         break;
+
+        case BinaryOp::Shl:        r->bin_op = RtlBinOp::Shl;        break;
+        case BinaryOp::Shr:        r->bin_op = RtlBinOp::Shr;        break;
+        case BinaryOp::Ashl:       r->bin_op = RtlBinOp::Ashl;       break;
+        case BinaryOp::Ashr:       r->bin_op = RtlBinOp::Ashr;       break;
+
+        default:
+            r->bin_op = RtlBinOp::Add; // safe default; should not hit in RTL subset
+            break;
         }
         if (e.lhs) r->lhs = lowerExpr(*e.lhs);
         if (e.rhs) r->rhs = lowerExpr(*e.rhs);
@@ -166,19 +181,26 @@ std::unique_ptr<RtlExpr> IRBuilder::lowerExpr(const Expression &e) {
     case ExprKind::Unary: {
         auto r = std::make_unique<RtlExpr>(RtlExprKind::Unary);
         switch (e.unary_op) {
-        case UnaryOp::Plus: r->un_op = RtlUnOp::Plus; break;
-        case UnaryOp::Minus: r->un_op = RtlUnOp::Minus; break;
-        case UnaryOp::Not: r->un_op = RtlUnOp::Not; break;
-        case UnaryOp::BitNot: r->un_op = RtlUnOp::BitNot; break;
+        case UnaryOp::Plus:       r->un_op = RtlUnOp::Plus;       break;
+        case UnaryOp::Minus:      r->un_op = RtlUnOp::Minus;      break;
+        case UnaryOp::LogicalNot: r->un_op = RtlUnOp::Not;        break;
+        case UnaryOp::BitNot:     r->un_op = RtlUnOp::BitNot;     break;
         }
         if (e.unary_operand) r->un_operand = lowerExpr(*e.unary_operand);
         return r;
     }
-    case ExprKind::Ternary:
-        // For now, collapse ternary into a placeholder constant
-        // (full lowering can be added later)
+    case ExprKind::Ternary: {
+        // TODO: full ternary lowering; for now, keep a placeholder
+        auto r = std::make_unique<RtlExpr>(RtlExprKind::Const);
+        r->const_literal = "0"; // placeholder
+        return r;
+    }
+    case ExprKind::Concatenation:
+    case ExprKind::Replication:
+        // Not yet modeled in RtlExpr; placeholder
         return std::make_unique<RtlExpr>(RtlExprKind::Const);
     }
+
     return std::make_unique<RtlExpr>(RtlExprKind::Const);
 }
 

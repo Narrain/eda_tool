@@ -21,7 +21,7 @@ void Elaborator::elaborateModule(const ModuleDecl &mod, ElaboratedDesign &out) {
             ElabParam p;
             p.name = item->param_decl->name;
             if (item->param_decl->value && item->param_decl->value->kind == ExprKind::Number) {
-                p.value_str = item->param_decl->value->number_literal;
+                p.value_str = item->param_decl->value->literal;
             } else {
                 p.value_str = "<expr>";
             }

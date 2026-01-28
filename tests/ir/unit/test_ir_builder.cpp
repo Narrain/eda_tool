@@ -20,7 +20,7 @@ int main() {
     pitem->param_decl = std::make_unique<ParamDecl>();
     pitem->param_decl->name = "WIDTH";
     pitem->param_decl->value = std::make_unique<Expression>(ExprKind::Number);
-    pitem->param_decl->value->number_literal = "8";
+    pitem->param_decl->value->literal = "8";
     mod->items.push_back(std::move(pitem));
 
     // net
@@ -37,7 +37,7 @@ int main() {
     stmt->lhs = std::make_unique<Expression>(ExprKind::Identifier);
     stmt->lhs->ident = "a";
     stmt->rhs = std::make_unique<Expression>(ExprKind::Number);
-    stmt->rhs->number_literal = "1";
+    stmt->rhs->literal = "1";
     aitem->always->body = std::move(stmt);
     mod->items.push_back(std::move(aitem));
 

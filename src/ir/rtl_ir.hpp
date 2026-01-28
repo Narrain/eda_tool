@@ -21,25 +21,60 @@ enum class RtlExprKind {
 };
 
 enum class RtlBinOp {
-    Add, Sub, Mul, Div,
-    And, Or, Xor,
-    Eq, Neq, Lt, Gt, Le, Ge,
-    LogicalAnd, LogicalOr
+    // arithmetic
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+
+    // bitwise
+    And,
+    Or,
+    Xor,
+
+    // comparisons
+    Eq,
+    Neq,
+    CaseEq,
+    CaseNeq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+
+    // logical
+    LogicalAnd,
+    LogicalOr,
+
+    // shifts
+    Shl,
+    Shr,
+    Ashl,
+    Ashr
 };
 
 enum class RtlUnOp {
-    Plus, Minus, Not, BitNot
+    Plus,
+    Minus,
+    Not,     // logical not
+    BitNot   // bitwise not
 };
 
 struct RtlExpr {
     RtlExprKind kind;
 
+    // Ref
     std::string ref_name;
+
+    // Const
     std::string const_literal;
 
+    // Unary
     RtlUnOp un_op{};
     std::unique_ptr<RtlExpr> un_operand;
 
+    // Binary
     RtlBinOp bin_op{};
     std::unique_ptr<RtlExpr> lhs;
     std::unique_ptr<RtlExpr> rhs;
@@ -47,29 +82,30 @@ struct RtlExpr {
     explicit RtlExpr(RtlExprKind k) : kind(k) {}
 
     // ---- deep copy constructor ----
-    RtlExpr(const RtlExpr &o) : kind(o.kind),
-                                ref_name(o.ref_name),
-                                const_literal(o.const_literal),
-                                un_op(o.un_op),
-                                bin_op(o.bin_op)
+    RtlExpr(const RtlExpr &o)
+        : kind(o.kind),
+          ref_name(o.ref_name),
+          const_literal(o.const_literal),
+          un_op(o.un_op),
+          bin_op(o.bin_op)
     {
         if (o.un_operand) un_operand = std::make_unique<RtlExpr>(*o.un_operand);
-        if (o.lhs) lhs = std::make_unique<RtlExpr>(*o.lhs);
-        if (o.rhs) rhs = std::make_unique<RtlExpr>(*o.rhs);
+        if (o.lhs)        lhs        = std::make_unique<RtlExpr>(*o.lhs);
+        if (o.rhs)        rhs        = std::make_unique<RtlExpr>(*o.rhs);
     }
 
     // ---- deep copy assignment ----
     RtlExpr &operator=(const RtlExpr &o) {
         if (this == &o) return *this;
-        kind = o.kind;
-        ref_name = o.ref_name;
+        kind          = o.kind;
+        ref_name      = o.ref_name;
         const_literal = o.const_literal;
-        un_op = o.un_op;
-        bin_op = o.bin_op;
+        un_op         = o.un_op;
+        bin_op        = o.bin_op;
 
         un_operand = o.un_operand ? std::make_unique<RtlExpr>(*o.un_operand) : nullptr;
-        lhs = o.lhs ? std::make_unique<RtlExpr>(*o.lhs) : nullptr;
-        rhs = o.rhs ? std::make_unique<RtlExpr>(*o.rhs) : nullptr;
+        lhs        = o.lhs        ? std::make_unique<RtlExpr>(*o.lhs)        : nullptr;
+        rhs        = o.rhs        ? std::make_unique<RtlExpr>(*o.rhs)        : nullptr;
 
         return *this;
     }
@@ -105,9 +141,9 @@ struct RtlAssign {
 
     RtlAssign &operator=(const RtlAssign &o) {
         if (this == &o) return *this;
-        kind = o.kind;
+        kind     = o.kind;
         lhs_name = o.lhs_name;
-        rhs = o.rhs ? std::make_unique<RtlExpr>(*o.rhs) : nullptr;
+        rhs      = o.rhs ? std::make_unique<RtlExpr>(*o.rhs) : nullptr;
         return *this;
     }
 
@@ -137,7 +173,7 @@ struct RtlProcess {
 
     RtlProcess &operator=(const RtlProcess &o) {
         if (this == &o) return *this;
-        kind = o.kind;
+        kind    = o.kind;
         assigns = o.assigns;
         return *this;
     }
@@ -198,7 +234,6 @@ struct RtlModule {
 
     RtlModule() = default;
 
-    // deep copy
     RtlModule(const RtlModule &) = default;
     RtlModule &operator=(const RtlModule &) = default;
 

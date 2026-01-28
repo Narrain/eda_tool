@@ -1,4 +1,3 @@
-// path: src/ir/ir_builder.hpp
 #ifndef __IR_BUILDER_HPP__
 #define __IR_BUILDER_HPP__
 

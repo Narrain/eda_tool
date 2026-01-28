@@ -20,7 +20,7 @@ int main() {
     pitem->param_decl = std::make_unique<ParamDecl>();
     pitem->param_decl->name = "WIDTH";
     pitem->param_decl->value = std::make_unique<Expression>(ExprKind::Number);
-    pitem->param_decl->value->number_literal = "8";
+    pitem->param_decl->value->literal = "8";
     mod->items.push_back(std::move(pitem));
 
     // net

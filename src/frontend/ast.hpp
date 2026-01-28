@@ -1,16 +1,15 @@
 #ifndef __AST_HPP__
 #define __AST_HPP__
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
-#include <cstdint>
-#include <optional>
 
 namespace sv {
 
 // -----------------------------------------------------
-// Lexical layer: tokens shared by lexer and parser
+// Source locations and tokens
 // -----------------------------------------------------
 
 struct SourceLocation {
@@ -22,13 +21,14 @@ struct SourceLocation {
 enum class TokenKind {
     Identifier,
     Number,
+    String,
     Symbol,
     Keyword,
     EndOfFile
 };
 
 struct Token {
-    TokenKind kind;
+    TokenKind kind = TokenKind::EndOfFile;
     std::string text;
     SourceLocation loc;
 };
@@ -49,9 +49,12 @@ struct Node {
 enum class ExprKind {
     Identifier,
     Number,
-    Binary,
+    String,
     Unary,
-    Ternary
+    Binary,
+    Ternary,
+    Concatenation,
+    Replication
 };
 
 enum class BinaryOp {
@@ -59,23 +62,34 @@ enum class BinaryOp {
     Sub,
     Mul,
     Div,
-    And,
-    Or,
-    Xor,
+    Mod,
+
+    BitAnd,
+    BitOr,
+    BitXor,
+
+    LogicalAnd,
+    LogicalOr,
+
     Eq,
     Neq,
+    CaseEq,
+    CaseNeq,
     Lt,
     Gt,
     Le,
     Ge,
-    LogicalAnd,
-    LogicalOr
+
+    Shl,
+    Shr,
+    Ashl,
+    Ashr
 };
 
 enum class UnaryOp {
     Plus,
     Minus,
-    Not,
+    LogicalNot,
     BitNot
 };
 
@@ -85,8 +99,8 @@ struct Expression : Node {
     // Identifier
     std::string ident;
 
-    // Number
-    std::string number_literal;
+    // Number / String
+    std::string literal;
 
     // Unary
     UnaryOp unary_op;
@@ -102,6 +116,13 @@ struct Expression : Node {
     std::unique_ptr<Expression> then_expr;
     std::unique_ptr<Expression> else_expr;
 
+    // Concatenation {a, b, c}
+    std::vector<std::unique_ptr<Expression>> concat_elems;
+
+    // Replication {N{a, b}}
+    std::unique_ptr<Expression> replicate_count;
+    std::vector<std::unique_ptr<Expression>> replicate_elems;
+
     explicit Expression(ExprKind k) : kind(k) {}
 };
 
@@ -113,9 +134,20 @@ enum class StmtKind {
     Null,
     Block,
     If,
-    Assign,
-    NonBlockingAssign,
-    BlockingAssign
+    Case,
+    BlockingAssign,
+    NonBlockingAssign
+};
+
+enum class CaseKind {
+    Case,
+    CaseZ,
+    CaseX
+};
+
+struct CaseItem {
+    std::vector<std::unique_ptr<Expression>> matches; // empty => default
+    std::unique_ptr<struct Statement> stmt;
 };
 
 struct Statement : Node {
@@ -128,6 +160,11 @@ struct Statement : Node {
     std::unique_ptr<Expression> if_cond;
     std::unique_ptr<Statement> if_then;
     std::unique_ptr<Statement> if_else;
+
+    // Case
+    CaseKind case_kind = CaseKind::Case;
+    std::unique_ptr<Expression> case_expr;
+    std::vector<CaseItem> case_items;
 
     // Assignments
     std::unique_ptr<Expression> lhs;
@@ -156,13 +193,13 @@ enum class DataTypeKind {
 
 struct DataType {
     DataTypeKind kind = DataTypeKind::Unknown;
+    bool is_packed = false;
     int msb = -1;
     int lsb = -1;
-    bool is_packed = false;
 };
 
 struct PortDecl : Node {
-    PortDirection dir;
+    PortDirection dir = PortDirection::Input;
     DataType type;
     std::string name;
 };
@@ -190,7 +227,7 @@ struct ContinuousAssign : Node {
 };
 
 // -----------------------------------------------------
-// Always constructs
+// Always / initial constructs
 // -----------------------------------------------------
 
 enum class AlwaysKind {
@@ -203,12 +240,17 @@ enum class AlwaysKind {
 struct SensitivityItem {
     bool posedge = false;
     bool negedge = false;
+    bool star = false; // @* or @(*)
     std::unique_ptr<Expression> expr;
 };
 
 struct AlwaysConstruct : Node {
     AlwaysKind kind = AlwaysKind::Always;
     std::vector<SensitivityItem> sensitivity_list;
+    std::unique_ptr<Statement> body;
+};
+
+struct InitialConstruct : Node {
     std::unique_ptr<Statement> body;
 };
 
@@ -222,11 +264,12 @@ enum class ModuleItemKind {
     ParamDecl,
     ContinuousAssign,
     Always,
+    Initial,
     Instance
 };
 
 struct InstancePortConn {
-    std::string port_name;
+    std::string port_name; // empty => positional
     std::unique_ptr<Expression> expr;
 };
 
@@ -243,6 +286,7 @@ struct ModuleItem : Node {
     std::unique_ptr<ParamDecl> param_decl;
     std::unique_ptr<ContinuousAssign> cont_assign;
     std::unique_ptr<AlwaysConstruct> always;
+    std::unique_ptr<InitialConstruct> initial;
     std::unique_ptr<Instance> instance;
 
     explicit ModuleItem(ModuleItemKind k) : kind(k) {}
