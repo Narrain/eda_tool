@@ -208,11 +208,40 @@ std::unique_ptr<RtlExpr> IRBuilder::lowerExpr(const Expression &e) {
         return r;
     }
     case ExprKind::Ternary: {
-        // TODO: full ternary lowering; for now, keep a placeholder
-        auto r = std::make_unique<RtlExpr>(RtlExprKind::Const);
-        r->const_literal = "0"; // placeholder
-        return r;
+        // cond ? then_expr : else_expr
+        // Lower into: (cond & then_expr) | (~cond & else_expr)
+
+        // Lower subexpressions
+        auto cond = lowerExpr(*e.cond);
+        auto t    = lowerExpr(*e.then_expr);   // <-- correct field name
+        auto f    = lowerExpr(*e.else_expr);   // <-- correct field name
+
+        // (cond & t)
+        auto and1 = std::make_unique<RtlExpr>(RtlExprKind::Binary);
+        and1->bin_op = RtlBinOp::And;
+        and1->lhs = std::make_unique<RtlExpr>(*cond);
+        and1->rhs = std::make_unique<RtlExpr>(*t);
+
+        // ~cond
+        auto notc = std::make_unique<RtlExpr>(RtlExprKind::Unary);
+        notc->un_op = RtlUnOp::BitNot;
+        notc->un_operand = std::move(cond);
+
+        // (~cond & f)
+        auto and2 = std::make_unique<RtlExpr>(RtlExprKind::Binary);
+        and2->bin_op = RtlBinOp::And;
+        and2->lhs = std::move(notc);
+        and2->rhs = std::move(f);
+
+        // (cond & t) | (~cond & f)
+        auto or_expr = std::make_unique<RtlExpr>(RtlExprKind::Binary);
+        or_expr->bin_op = RtlBinOp::Or;
+        or_expr->lhs = std::move(and1);
+        or_expr->rhs = std::move(and2);
+
+        return or_expr;
     }
+
     case ExprKind::Concatenation:
     case ExprKind::Replication:
         // Not yet modeled in RtlExpr; placeholder

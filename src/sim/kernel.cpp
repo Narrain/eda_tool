@@ -89,6 +89,16 @@ void Kernel::load_design(const RtlDesign *design) {
     for (auto &p : rtl_processes_) {
         schedule(p, 0, p.region());
     }
+    // Simple combinational settle at time 0:
+    // run all Active-region processes a few times to propagate constants.
+    for (int iter = 0; iter < 4; ++iter) {
+        for (auto &p : rtl_processes_) {
+            if (p.region() == SchedRegion::Active) {
+                p.run(*this);
+            }
+        }
+    }
+
 }
 
 void Kernel::init_signals_from_rtl() {
@@ -289,12 +299,54 @@ static uint64_t parse_simple_int_literal(const std::string &s) {
 
 Value Kernel::eval_expr(const RtlExpr &e) {
     switch (e.kind) {
+
     case RtlExprKind::Ref: {
         // default width 1 for now
         return get_signal_value(e.ref_name, 1);
     }
+
     case RtlExprKind::Const: {
         const std::string &lit = e.const_literal;
+
+        // Handle Verilog-style literals like 1'b0, 4'b1010, etc.
+        auto pos = lit.find('\'');
+        if (pos != std::string::npos && pos + 2 < lit.size()) {
+            // width is lit.substr(0, pos) but we ignore it for now
+            char base = std::tolower(lit[pos + 1]);
+            std::string digits = lit.substr(pos + 2);
+
+            switch (base) {
+            case 'b': {
+                // binary: use digits directly
+                return Value::from_binary_string(digits);
+            }
+            case 'd': {
+                uint64_t v = parse_simple_int_literal(digits);
+                return Value::from_uint(32, v);
+            }
+            case 'h': {
+                // hex: expand each hex nibble to 4 bits
+                std::string bin;
+                for (char c : digits) {
+                    uint8_t val;
+                    if (c >= '0' && c <= '9') val = c - '0';
+                    else if (c >= 'a' && c <= 'f') val = 10 + (c - 'a');
+                    else if (c >= 'A' && c <= 'F') val = 10 + (c - 'A');
+                    else continue;
+                    for (int i = 3; i >= 0; --i)
+                        bin.push_back((val & (1 << i)) ? '1' : '0');
+                }
+                if (bin.empty())
+                    return Value(1, Logic4::LX);
+                return Value::from_binary_string(bin);
+            }
+            default:
+                // unknown base → fall back to decimal
+                break;
+            }
+        }
+
+        // Fallback: old behavior
         bool is_bin = !lit.empty();
         for (char c : lit) {
             if (c != '0' && c != '1' && c != 'x' && c != 'X' && c != 'z' && c != 'Z') {
@@ -309,15 +361,19 @@ Value Kernel::eval_expr(const RtlExpr &e) {
             return Value::from_uint(32, v);
         }
     }
+
+
     case RtlExprKind::Unary: {
         Value op = eval_expr(*e.un_operand);
         Value out(op.width(), Logic4::LX);
+
         switch (e.un_op) {
         case RtlUnOp::Plus:
             return op;
+
         case RtlUnOp::Minus:
-            // placeholder: return X
-            return Value(op.width(), Logic4::LX);
+            return Value(op.width(), Logic4::LX); // placeholder
+
         case RtlUnOp::Not: {
             Logic4 acc = Logic4::L0;
             for (std::size_t i = 0; i < op.width(); ++i) {
@@ -331,41 +387,58 @@ Value Kernel::eval_expr(const RtlExpr &e) {
             v.set(0, res);
             return v;
         }
+
         case RtlUnOp::BitNot: {
-            for (std::size_t i = 0; i < op.width(); ++i) {
+            for (std::size_t i = 0; i < op.width(); ++i)
                 out.set(i, logic_not(op.get(i)));
-            }
             return out;
         }
         }
+
         return out;
     }
+
     case RtlExprKind::Binary: {
         Value lhs = eval_expr(*e.lhs);
         Value rhs = eval_expr(*e.rhs);
-        std::size_t width = (lhs.width() > rhs.width()) ? lhs.width() : rhs.width();
+
+        // ---- FIX: extend both sides to same width ----
+        std::size_t width = std::max(lhs.width(), rhs.width());
+
+        if (lhs.width() != width) {
+            Value tmp(width, Logic4::LX);
+            for (std::size_t i = 0; i < lhs.width(); ++i)
+                tmp.set(i, lhs.get(i));
+            lhs = std::move(tmp);
+        }
+
+        if (rhs.width() != width) {
+            Value tmp(width, Logic4::LX);
+            for (std::size_t i = 0; i < rhs.width(); ++i)
+                tmp.set(i, rhs.get(i));
+            rhs = std::move(tmp);
+        }
+
         Value out(width, Logic4::LX);
 
         auto apply_bitwise = [&](auto fn) {
-            for (std::size_t i = 0; i < width; ++i) {
-                Logic4 a = (i < lhs.width()) ? lhs.get(i) : Logic4::L0;
-                Logic4 b = (i < rhs.width()) ? rhs.get(i) : Logic4::L0;
-                out.set(i, fn(a, b));
-            }
+            for (std::size_t i = 0; i < width; ++i)
+                out.set(i, fn(lhs.get(i), rhs.get(i)));
         };
 
         switch (e.bin_op) {
         case RtlBinOp::And:
             apply_bitwise(logic_and);
             return out;
+
         case RtlBinOp::Or:
             apply_bitwise(logic_or);
             return out;
+
         case RtlBinOp::Xor:
             apply_bitwise(logic_xor);
             return out;
 
-        // everything else: placeholder X for now
         default:
             return Value(width, Logic4::LX);
         }
