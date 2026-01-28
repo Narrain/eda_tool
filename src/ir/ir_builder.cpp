@@ -14,6 +14,14 @@ RtlModule IRBuilder::buildModule(const ModuleDecl &mod) {
     RtlModule rm;
     rm.name = mod.name;
 
+    // NEW: treat ports as nets so sim/VCD can see them
+    for (const auto &p : mod.ports) {          // adjust to your real field name
+        RtlNet n;
+        n.name = p->name;                      // or p.name, depending on AST
+        n.type = p->type;                      // reuse existing DataType
+        rm.nets.push_back(std::move(n));
+    }
+
     collectParams(mod, rm);
     collectNets(mod, rm);
     collectContinuousAssigns(mod, rm);
@@ -22,6 +30,7 @@ RtlModule IRBuilder::buildModule(const ModuleDecl &mod) {
 
     return rm;
 }
+
 
 void IRBuilder::collectParams(const ModuleDecl &mod, RtlModule &out) {
     for (const auto &item : mod.items) {
@@ -99,6 +108,15 @@ void IRBuilder::collectProcesses(const ModuleDecl &mod, RtlModule &out) {
                     }
                 }
             }
+
+            // Sensitivity list extraction (for future kernel use).
+            // We keep it conservative for now: if the always has an explicit
+            // sensitivity list, we *could* walk item->always->sensitivity_list
+            // and collect identifiers from each expr. Until we wire that,
+            // leave sensitivity_signals empty and treat as combinational/clocked
+            // at the kernel level.
+            //
+            // p.sensitivity_signals = ... (to be filled when we hook kernel)
 
             out.processes.push_back(std::move(p));
         }
@@ -181,10 +199,10 @@ std::unique_ptr<RtlExpr> IRBuilder::lowerExpr(const Expression &e) {
     case ExprKind::Unary: {
         auto r = std::make_unique<RtlExpr>(RtlExprKind::Unary);
         switch (e.unary_op) {
-        case UnaryOp::Plus:       r->un_op = RtlUnOp::Plus;       break;
-        case UnaryOp::Minus:      r->un_op = RtlUnOp::Minus;      break;
-        case UnaryOp::LogicalNot: r->un_op = RtlUnOp::Not;        break;
-        case UnaryOp::BitNot:     r->un_op = RtlUnOp::BitNot;     break;
+        case UnaryOp::Plus:       r->un_op = RtlUnOp::Plus;   break;
+        case UnaryOp::Minus:      r->un_op = RtlUnOp::Minus;  break;
+        case UnaryOp::LogicalNot: r->un_op = RtlUnOp::Not;    break;
+        case UnaryOp::BitNot:     r->un_op = RtlUnOp::BitNot; break;
         }
         if (e.unary_operand) r->un_operand = lowerExpr(*e.unary_operand);
         return r;

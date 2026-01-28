@@ -1,4 +1,3 @@
-// path: src/sim/kernel.hpp
 #ifndef __KERNEL_HPP__
 #define __KERNEL_HPP__
 
@@ -36,7 +35,7 @@ class Kernel {
 public:
     Kernel() = default;
 
-    void load_design(const RtlDesign *design) { design_ = design; }
+    void load_design(const RtlDesign *design);
 
     void set_vcd(VcdWriter *vcd) { vcd_ = vcd; }
 
@@ -68,10 +67,25 @@ private:
     std::priority_queue<ScheduledProcess> pq_;
     std::vector<Process> nba_queue_;
 
+    // Signal storage: name -> 4-state value
     std::unordered_map<std::string, Value> signals_;
+
+    // Internal: processes we build from RTL (to keep lambdas alive)
+    std::vector<Process> rtl_processes_;
 
     void run_active_region(uint64_t target_time);
     void run_nba_region();
+
+    // ---- RTL wiring helpers ----
+    void init_signals_from_rtl();
+    void build_processes_from_rtl();
+
+    // Expression evaluation
+    Value eval_expr(const RtlExpr &e);
+
+    // Helpers to read/write signals
+    Value get_signal_value(const std::string &name, std::size_t width);
+    void drive_signal(const std::string &name, const Value &v, bool nba);
 };
 
 } // namespace sv

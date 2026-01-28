@@ -165,16 +165,23 @@ struct RtlProcess {
     RtlProcessKind kind{};
     std::vector<RtlAssign> assigns;
 
+    // For event‑driven scheduling: list of signal names this process is sensitive to.
+    // For @* / always_comb, this can be left empty and treated as "combinational".
+    std::vector<std::string> sensitivity_signals;
+
     RtlProcess() = default;
 
     // deep copy
     RtlProcess(const RtlProcess &o)
-        : kind(o.kind), assigns(o.assigns) {}
+        : kind(o.kind),
+          assigns(o.assigns),
+          sensitivity_signals(o.sensitivity_signals) {}
 
     RtlProcess &operator=(const RtlProcess &o) {
         if (this == &o) return *this;
-        kind    = o.kind;
-        assigns = o.assigns;
+        kind               = o.kind;
+        assigns            = o.assigns;
+        sensitivity_signals = o.sensitivity_signals;
         return *this;
     }
 
@@ -195,6 +202,27 @@ struct RtlNet {
 struct RtlParam {
     std::string name;
     std::string value_str;
+};
+
+// ----------------------
+// Gate‑level primitives
+// ----------------------
+
+enum class RtlGateKind {
+    And,
+    Or,
+    Not,
+    Nand,
+    Nor,
+    Xor,
+    Xnor,
+    Buf
+};
+
+struct RtlGate {
+    RtlGateKind kind;
+    std::string out;
+    std::vector<std::string> inputs;
 };
 
 // ----------------------
@@ -231,6 +259,9 @@ struct RtlModule {
     std::vector<RtlProcess> processes;
     std::vector<RtlAssign> continuous_assigns;
     std::vector<RtlInstance> instances;
+
+    // Gate‑level primitives (populated later from synth/netlist)
+    std::vector<RtlGate> gates;
 
     RtlModule() = default;
 

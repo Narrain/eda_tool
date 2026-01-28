@@ -95,12 +95,16 @@ int main(int argc, char **argv) {
     // Simulation + VCD
     // -----------------------------
     Kernel k;
-    k.load_design(&rd);
 
     VcdWriter vcd("wave.vcd");
     if (vcd.good()) {
         k.set_vcd(&vcd);
     }
+
+    k.load_design(&rd);    // <-- move this *after* set_vcd()
+
+    // Run a small simulation window
+    k.run(10);
 
     // -----------------------------
     // Coverage
