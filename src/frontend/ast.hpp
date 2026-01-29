@@ -54,10 +54,12 @@ enum class ExprKind {
     Binary,
     Ternary,
     Concatenation,
-    Replication
+    Replication,
+    BitSelect
 };
 
 enum class BinaryOp {
+    Assign,
     Add,
     Sub,
     Mul,
@@ -136,7 +138,9 @@ enum class StmtKind {
     If,
     Case,
     BlockingAssign,
-    NonBlockingAssign
+    NonBlockingAssign,
+    Delay,
+    ExprStmt
 };
 
 enum class CaseKind {
@@ -169,6 +173,10 @@ struct Statement : Node {
     // Assignments
     std::unique_ptr<Expression> lhs;
     std::unique_ptr<Expression> rhs;
+    // Delay
+    std::unique_ptr<Expression> delay_expr; 
+    std::unique_ptr<Statement> delay_stmt;
+    std::unique_ptr<Expression> expr;
 
     explicit Statement(StmtKind k) : kind(k) {}
 };
@@ -266,7 +274,8 @@ enum class ModuleItemKind {
     Always,
     Initial,
     Instance,
-    Generate
+    Generate,
+    GenVarDecl
 };
 
 struct InstancePortConn {
@@ -298,6 +307,10 @@ struct ModuleItem;
 struct GenerateBlock : Node {
     std::string name; // optional
     std::vector<std::unique_ptr<ModuleItem>> items;
+};
+
+struct GenVarDecl : Node {
+    std::string name;
 };
 
 struct GenerateItem : Node {
@@ -339,6 +352,7 @@ struct ModuleItem : Node {
     std::unique_ptr<AlwaysConstruct> always;
     std::unique_ptr<InitialConstruct> initial;
     std::unique_ptr<Instance> instance;
+    std::unique_ptr<GenVarDecl> genvar_decl;
 
     // NEW:
     std::unique_ptr<GenerateConstruct> gen;
@@ -348,6 +362,7 @@ struct ModuleItem : Node {
 
 struct ModuleDecl : Node {
     std::string name;
+    std::vector<std::unique_ptr<ParamDecl>> params;
     std::vector<std::unique_ptr<PortDecl>> ports;
     std::vector<std::unique_ptr<ModuleItem>> items;
 };

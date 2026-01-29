@@ -14,22 +14,60 @@ RtlModule IRBuilder::buildModule(const ModuleDecl &mod) {
     RtlModule rm;
     rm.name = mod.name;
 
-    // NEW: treat ports as nets so sim/VCD can see them
-    for (const auto &p : mod.ports) {          // adjust to your real field name
-        RtlNet n;
-        n.name = p->name;                      // or p.name, depending on AST
-        n.type = p->type;                      // reuse existing DataType
-        rm.nets.push_back(std::move(n));
+    // 1) Look up the elaborated module
+    auto it = elab_.modules.find(mod.name);
+    if (it == elab_.modules.end()) {
+        // fallback: no elaborated version, use raw AST
+        collectParams(mod, rm);
+        collectNets(mod, rm);
+        collectContinuousAssigns(mod, rm);
+        collectProcesses(mod, rm);
+        collectInstances(mod, rm);
+        return rm;
     }
 
-    collectParams(mod, rm);
-    collectNets(mod, rm);
-    collectContinuousAssigns(mod, rm);
+    const ElabModule &em = it->second;
+
+    // 2) Params (from elaborated design)
+    for (const auto &p : em.params) {
+        RtlParam rp;
+        rp.name = p.name;
+        rp.value_str = p.value_str;
+        rm.params.push_back(std::move(rp));
+    }
+
+    // 3) Nets (from elaborated design)
+    for (const auto &n : em.nets) {
+        RtlNet rn;
+        rn.name = n.name;
+        rn.type = n.type;
+        rm.nets.push_back(std::move(rn));
+    }
+
+    // 4) Instances (from elaborated design)
+    for (const auto &inst : em.instances) {
+        RtlInstance ri;
+        ri.module_name = inst.module_name;
+        ri.instance_name = inst.instance_name;
+
+        for (const auto &pc : inst.port_conns) {
+            RtlInstanceConn c;
+            c.port_name = pc.first;
+            c.signal_name = pc.second;
+            ri.conns.push_back(std::move(c));
+        }
+
+        rm.instances.push_back(std::move(ri));
+    }
+
+    // 5) Processes + continuous assigns
+    //    These still come from the AST, but now generate-for is already expanded
     collectProcesses(mod, rm);
-    collectInstances(mod, rm);
+    collectContinuousAssigns(mod, rm);
 
     return rm;
 }
+
 
 
 void IRBuilder::collectParams(const ModuleDecl &mod, RtlModule &out) {
@@ -413,5 +451,6 @@ RtlAssign IRBuilder::lowerAssign(const Statement &s, RtlAssignKind kind) {
     }
     return a;
 }
+
 
 } // namespace sv

@@ -31,6 +31,11 @@ struct ScheduledProcess {
     }
 };
 
+struct Thread {
+    const RtlStmt* stmt;     // current statement
+    const RtlStmt* next;     // next statement after delay
+};
+
 class Kernel {
 public:
     Kernel() = default;
@@ -56,6 +61,7 @@ public:
 
     uint64_t time() const { return cur_time_; }
     uint64_t delta() const { return cur_delta_; }
+    void exec_stmt(Thread &th);
 
 private:
     const RtlDesign *design_ = nullptr;
@@ -89,6 +95,7 @@ private:
 
     // Expression evaluation
     Value eval_expr(const RtlExpr &e);
+    uint64_t eval_delay(const RtlExpr &e);
 
     // Helpers to read/write signals
     Value get_signal_value(const std::string &name, std::size_t width);

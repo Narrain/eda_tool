@@ -152,6 +152,62 @@ struct RtlAssign {
     RtlAssign &operator=(RtlAssign &&) noexcept = default;
 };
 
+
+// ----------------------
+// Procedural statements
+// ----------------------
+
+enum class RtlStmtKind {
+    BlockingAssign,
+    NonBlockingAssign,
+    Delay,
+    Finish
+};
+
+struct RtlStmt {
+    RtlStmtKind kind{};
+
+    // For assignments
+    std::string lhs_name;
+    std::unique_ptr<RtlExpr> rhs;
+
+    // For delay statements:  #<delay_expr> <delay_stmt>;
+    std::unique_ptr<RtlExpr> delay_expr;
+    RtlStmt* delay_stmt = nullptr;
+
+    // Sequencing: next statement in the same block
+    RtlStmt* next = nullptr;
+
+    RtlStmt() = default;
+
+    // deep copy
+    RtlStmt(const RtlStmt &o)
+        : kind(o.kind),
+          lhs_name(o.lhs_name),
+          delay_stmt(nullptr),
+          next(nullptr)
+    {
+        if (o.rhs)        rhs        = std::make_unique<RtlExpr>(*o.rhs);
+        if (o.delay_expr) delay_expr = std::make_unique<RtlExpr>(*o.delay_expr);
+        // NOTE: delay_stmt/next are pointers within a block; they are
+        // re‑wired when building the block, not copied blindly.
+    }
+
+    RtlStmt &operator=(const RtlStmt &o) {
+        if (this == &o) return *this;
+        kind      = o.kind;
+        lhs_name  = o.lhs_name;
+        rhs       = o.rhs        ? std::make_unique<RtlExpr>(*o.rhs)        : nullptr;
+        delay_expr= o.delay_expr ? std::make_unique<RtlExpr>(*o.delay_expr) : nullptr;
+        delay_stmt = nullptr;
+        next       = nullptr;
+        return *this;
+    }
+
+    RtlStmt(RtlStmt &&) noexcept = default;
+    RtlStmt &operator=(RtlStmt &&) noexcept = default;
+};
+
 // ----------------------
 // Processes
 // ----------------------
@@ -161,13 +217,17 @@ enum class RtlProcessKind {
     Always
 };
 
+
 struct RtlProcess {
     RtlProcessKind kind{};
     std::vector<RtlAssign> assigns;
 
-    // For event‑driven scheduling: list of signal names this process is sensitive to.
-    // For @* / always_comb, this can be left empty and treated as "combinational".
+    // For event‑driven scheduling
     std::vector<std::string> sensitivity_signals;
+
+    // NEW: procedural body (for initial/always)
+    RtlStmt* first_stmt = nullptr;
+    std::vector<std::unique_ptr<RtlStmt>> stmts; // owns the statements
 
     RtlProcess() = default;
 
@@ -175,17 +235,37 @@ struct RtlProcess {
     RtlProcess(const RtlProcess &o)
         : kind(o.kind),
           assigns(o.assigns),
-          sensitivity_signals(o.sensitivity_signals) {}
+          sensitivity_signals(o.sensitivity_signals)
+    {
+        // Copy stmts, then re‑wire first_stmt/next/delay_stmt later
+        stmts.reserve(o.stmts.size());
+        for (const auto &up : o.stmts) {
+            if (up)
+                stmts.push_back(std::make_unique<RtlStmt>(*up));
+            else
+                stmts.push_back(nullptr);
+        }
+        first_stmt = nullptr; // will be set by whoever builds the process
+    }
 
     RtlProcess &operator=(const RtlProcess &o) {
         if (this == &o) return *this;
-        kind               = o.kind;
-        assigns            = o.assigns;
+        kind                = o.kind;
+        assigns             = o.assigns;
         sensitivity_signals = o.sensitivity_signals;
+
+        stmts.clear();
+        stmts.reserve(o.stmts.size());
+        for (const auto &up : o.stmts) {
+            if (up)
+                stmts.push_back(std::make_unique<RtlStmt>(*up));
+            else
+                stmts.push_back(nullptr);
+        }
+        first_stmt = nullptr;
         return *this;
     }
 
-    // move
     RtlProcess(RtlProcess &&) noexcept = default;
     RtlProcess &operator=(RtlProcess &&) noexcept = default;
 };

@@ -14,6 +14,10 @@ public:
     explicit Parser(const std::vector<Token> &tokens);
 
     std::unique_ptr<Design> parseDesign();
+    std::unique_ptr<ModuleItem> parseGenerateConstruct();
+    std::unique_ptr<GenerateItem> parseGenerateItem();
+    std::unique_ptr<GenerateItem> parseGenerateFor();
+
 
 private:
     const std::vector<Token> &tokens_;

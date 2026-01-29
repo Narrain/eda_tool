@@ -1,5 +1,6 @@
 #include <stdexcept>
 #include "parser.hpp"
+#include <iostream>
 
 namespace sv {
 
@@ -50,6 +51,7 @@ bool Parser::isSymbol(const std::string &s) const {
 
 int Parser::getBinOpPrecedence(const std::string &op) const {
     // lower number => lower precedence
+    // *** IMPORTANT: '=' is NOT an expression operator here ***
     if (op == "||") return 1;
     if (op == "&&") return 2;
     if (op == "==" || op == "!=" || op == "===" || op == "!==") return 3;
@@ -148,6 +150,36 @@ std::unique_ptr<ModuleDecl> Parser::parseModule() {
     mod->name = nameTok.text;
     mod->loc = modTok.loc;
 
+    // -----------------------------------------
+    // MODULE PARAMETER LIST: #(parameter ...)
+    // -----------------------------------------
+    if (isSymbol("#")) {
+        get(); // '#'
+        expect(TokenKind::Symbol, "(");
+
+        while (!isSymbol(")")) {
+            expect(TokenKind::Keyword, "parameter");
+            auto pnameTok = expect(TokenKind::Identifier);
+            expect(TokenKind::Symbol, "=");
+            auto expr = parseExpression();
+
+            auto p = std::make_unique<ParamDecl>();
+            p->name = pnameTok.text;
+            p->value = std::move(expr);
+            p->loc = pnameTok.loc;
+            mod->params.push_back(std::move(p));
+
+            if (isSymbol(",")) {
+                get();
+                continue;
+            }
+            break;
+        }
+
+        expect(TokenKind::Symbol, ")");
+    }
+    // -----------------------------------------
+
     // port list
     if (isSymbol("(")) {
         get(); // (
@@ -205,6 +237,18 @@ std::unique_ptr<PortDecl> Parser::parsePortDecl() {
 }
 
 std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
+std::cerr << "MI: '" << peek().text 
+          << "' kind=" << (int)peek().kind 
+          << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
+
+    if (peek().text == "for") {
+        auto gc = std::make_unique<GenerateConstruct>();
+        gc->item = parseGenerateFor();
+        auto item = std::make_unique<ModuleItem>(ModuleItemKind::Generate);
+        item->gen = std::move(gc);
+        return item;
+    }
+
     // parameter / localparam
     if (match(TokenKind::Keyword, "parameter") ||
         match(TokenKind::Keyword, "localparam")) {
@@ -241,6 +285,26 @@ std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
         return item;
     }
 
+    // generate ... endgenerate
+    if (match(TokenKind::Keyword, "generate")) {
+        return parseGenerateConstruct();
+    }
+
+    // genvar declaration  (handle even if lexer classifies it as Identifier)
+    if (peek().text == "genvar") {
+        const Token &kw = get(); // consume 'genvar'
+        auto nameTok = expect(TokenKind::Identifier);
+        expect(TokenKind::Symbol, ";");
+
+        auto gv = std::make_unique<GenVarDecl>();
+        gv->name = nameTok.text;
+        gv->loc = kw.loc;
+
+        auto item = std::make_unique<ModuleItem>(ModuleItemKind::GenVarDecl);
+        item->genvar_decl = std::move(gv);
+        return item;
+    }
+
     // net/var decl
     if (match(TokenKind::Keyword, "wire") ||
         match(TokenKind::Keyword, "logic") ||
@@ -249,7 +313,6 @@ std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
         DataType dt = parseDataType();
         auto nameTok = expect(TokenKind::Identifier);
 
-        // decide net vs var by type kind
         if (dt.kind == DataTypeKind::Wire || dt.kind == DataTypeKind::Logic) {
             auto net = parseNetDecl(dt, nameTok);
             auto item = std::make_unique<ModuleItem>(ModuleItemKind::NetDecl);
@@ -263,22 +326,56 @@ std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
         }
     }
 
-    // instance: module_name inst_name (...)
+    // instance: module_name [#(...)] inst_name (...)
     if (match(TokenKind::Identifier)) {
         size_t saveIdx = idx_;
         auto modNameTok = get();
+
+        // INSTANCE PARAMETER OVERRIDES
+        std::vector<ParamOverride> overrides;
+
+        if (isSymbol("#")) {
+            get(); // '#'
+            expect(TokenKind::Symbol, "(");
+
+            while (!isSymbol(")")) {
+                expect(TokenKind::Symbol, ".");
+                auto pnameTok = expect(TokenKind::Identifier);
+                expect(TokenKind::Symbol, "(");
+                auto expr = parseExpression();
+                expect(TokenKind::Symbol, ")");
+
+                ParamOverride ov;
+                ov.name = pnameTok.text;
+                ov.value = std::move(expr);
+                overrides.push_back(std::move(ov));
+
+                if (isSymbol(",")) {
+                    get();
+                    continue;
+                }
+                break;
+            }
+
+            expect(TokenKind::Symbol, ")");
+        }
+
         if (match(TokenKind::Identifier)) {
             auto instNameTok = get();
+
             if (isSymbol("(")) {
                 auto inst = std::make_unique<Instance>();
                 inst->module_name = modNameTok.text;
                 inst->instance_name = instNameTok.text;
                 inst->loc = modNameTok.loc;
 
-                get(); // (
+                inst->param_overrides = std::move(overrides);
+
+                get(); // '('
                 if (!isSymbol(")")) {
                     while (true) {
                         InstancePortConn conn;
+
                         if (isSymbol(".")) {
                             get();
                             auto portNameTok = expect(TokenKind::Identifier);
@@ -289,7 +386,9 @@ std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
                         } else {
                             conn.expr = parseExpression();
                         }
+
                         inst->port_conns.push_back(std::move(conn));
+
                         if (isSymbol(",")) {
                             get();
                             continue;
@@ -297,6 +396,7 @@ std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
                         break;
                     }
                 }
+
                 expect(TokenKind::Symbol, ")");
                 expect(TokenKind::Symbol, ";");
 
@@ -305,15 +405,16 @@ std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
                 return item;
             }
         }
-        // not an instance, rewind
-        idx_ = saveIdx;
+
+        idx_ = saveIdx; // rewind
     }
 
     const Token &t = peek();
-    throw std::runtime_error("Unsupported or invalid module item near token '" +
-                             t.text + "' at " + t.loc.file + ":" +
-                             std::to_string(t.loc.line) + ":" +
-                             std::to_string(t.loc.column));
+    throw std::runtime_error(
+        "Unsupported or invalid module item near token '" +
+        t.text + "' at " + t.loc.file + ":" +
+        std::to_string(t.loc.line) + ":" +
+        std::to_string(t.loc.column));
 }
 
 // -----------------------------------------------------
@@ -445,18 +546,118 @@ void Parser::parseSensitivityList(AlwaysConstruct &a) {
 // -----------------------------------------------------
 // statements
 // -----------------------------------------------------
+std::unique_ptr<Statement> Parser::parseStatement() {
+    std::cerr << "DEBUG TOKEN: '" << peek().text 
+              << "' kind=" << (int)peek().kind 
+              << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
+
+    // delay control: #expr statement  (MUST be first)
+    if (isSymbol("#")) {
+        auto hashTok = get(); // '#'
+        auto delayExpr = parseExpression();
+
+        // after delay, parse the actual statement
+        auto stmt = parseStatement();
+
+        auto s = std::make_unique<Statement>(StmtKind::Delay);
+        s->loc = hashTok.loc;
+        s->delay_expr = std::move(delayExpr);
+        s->delay_stmt = std::move(stmt);
+        return s;
+    }
+
+    // if
+    if (match(TokenKind::Keyword, "if")) {
+        return parseIfStatement();
+    }
+
+    // case/casez/casex
+    if (isCaseKeyword()) {
+        return parseCaseStatement();
+    }
+
+    // null statement
+    if (isSymbol(";")) {
+        auto semi = get();
+        auto s = std::make_unique<Statement>(StmtKind::Null);
+        s->loc = semi.loc;
+        return s;
+    }
+
+    // assignment-like statement
+    auto lhs = parseExpression();
+
+    if (isSymbol("<=")) {
+        auto tok = get();
+        auto rhs = parseExpression();
+        expect(TokenKind::Symbol, ";");
+
+        auto s = std::make_unique<Statement>(StmtKind::NonBlockingAssign);
+        s->loc = tok.loc;
+        s->lhs = std::move(lhs);
+        s->rhs = std::move(rhs);
+        return s;
+    }
+
+    if (isSymbol("=")) {
+        auto tok = get();
+        auto rhs = parseExpression();
+        expect(TokenKind::Symbol, ";");
+
+        auto s = std::make_unique<Statement>(StmtKind::BlockingAssign);
+        s->loc = tok.loc;
+        s->lhs = std::move(lhs);
+        s->rhs = std::move(rhs);
+        return s;
+    }
+
+    const Token &t = peek();
+
+    // expression statement: <expr> ;
+    if (isSymbol(";")) {
+        auto semi = get();
+        auto s = std::make_unique<Statement>(StmtKind::ExprStmt);
+        s->loc = semi.loc;
+        s->expr = std::move(lhs);
+        return s;
+    }
+
+    throw std::runtime_error(
+        "Unsupported statement near token '" +
+        t.text + "' at " + t.loc.file + ":" +
+        std::to_string(t.loc.line) + ":" +
+        std::to_string(t.loc.column));
+}
 
 std::unique_ptr<Statement> Parser::parseStatementOrBlock() {
+    // begin ... end block
     if (match(TokenKind::Keyword, "begin")) {
         auto beginTok = get();
+
         auto blk = std::make_unique<Statement>(StmtKind::Block);
         blk->loc = beginTok.loc;
-        while (!match(TokenKind::Keyword, "end")) {
+
+        // parse statements until we hit 'end'
+        while (true) {
+            // stop at 'end'
+            if (match(TokenKind::Keyword, "end"))
+                break;
+
             blk->block_stmts.push_back(parseStatement());
         }
+
         expect(TokenKind::Keyword, "end");
+
+        // optional: end : label
+        if (isSymbol(":")) {
+            get(); // ':'
+            expect(TokenKind::Identifier); // label name
+        }
+
         return blk;
     }
+
+    // single statement
     return parseStatement();
 }
 
@@ -525,54 +726,6 @@ std::unique_ptr<Statement> Parser::parseCaseStatement() {
     return s;
 }
 
-std::unique_ptr<Statement> Parser::parseStatement() {
-    // if
-    if (match(TokenKind::Keyword, "if")) {
-        return parseIfStatement();
-    }
-
-    // case/casez/casex
-    if (isCaseKeyword()) {
-        return parseCaseStatement();
-    }
-
-    // null statement
-    if (isSymbol(";")) {
-        auto semi = get();
-        auto s = std::make_unique<Statement>(StmtKind::Null);
-        s->loc = semi.loc;
-        return s;
-    }
-
-    // assignment-like statement
-    auto lhs = parseExpression();
-    if (isSymbol("<=")) {
-        auto tok = get();
-        auto rhs = parseExpression();
-        expect(TokenKind::Symbol, ";");
-        auto s = std::make_unique<Statement>(StmtKind::NonBlockingAssign);
-        s->loc = tok.loc;
-        s->lhs = std::move(lhs);
-        s->rhs = std::move(rhs);
-        return s;
-    } else if (isSymbol("=")) {
-        auto tok = get();
-        auto rhs = parseExpression();
-        expect(TokenKind::Symbol, ";");
-        auto s = std::make_unique<Statement>(StmtKind::BlockingAssign);
-        s->loc = tok.loc;
-        s->lhs = std::move(lhs);
-        s->rhs = std::move(rhs);
-        return s;
-    }
-
-    const Token &t = peek();
-    throw std::runtime_error("Unsupported statement near token '" +
-                             t.text + "' at " + t.loc.file + ":" +
-                             std::to_string(t.loc.line) + ":" +
-                             std::to_string(t.loc.column));
-}
-
 // -----------------------------------------------------
 // expressions
 // -----------------------------------------------------
@@ -588,13 +741,39 @@ std::unique_ptr<Expression> Parser::parseExpression() {
 
 std::unique_ptr<Expression> Parser::parsePrimary() {
     const Token &t = peek();
+
+    // IDENTIFIER (with bit-select support)
     if (t.kind == TokenKind::Identifier) {
         auto tok = get();
-        auto e = std::make_unique<Expression>(ExprKind::Identifier);
-        e->loc = tok.loc;
-        e->ident = tok.text;
-        return e;
+
+        // base identifier
+        auto base = std::make_unique<Expression>(ExprKind::Identifier);
+        base->loc = tok.loc;
+        base->ident = tok.text;
+
+        // bit-select / part-select: id[expr]
+        while (isSymbol("[")) {
+            get(); // '['
+            auto index = parseExpression();
+            expect(TokenKind::Symbol, "]");
+
+            auto sel = std::make_unique<Expression>(ExprKind::BitSelect);
+            sel->loc = tok.loc;
+            sel->lhs = std::move(base);
+            sel->rhs = std::move(index);
+
+            base = std::move(sel);
+        }
+
+        // *** IMPORTANT FIX ***
+        // DO NOT PARSE "id = expr" HERE.
+        // Assignments are NOT expressions in SystemVerilog.
+        // They are handled ONLY in parseStatement() and parseContinuousAssign().
+
+        return base;
     }
+
+    // NUMBER
     if (t.kind == TokenKind::Number) {
         auto tok = get();
         auto e = std::make_unique<Expression>(ExprKind::Number);
@@ -602,6 +781,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         e->literal = tok.text;
         return e;
     }
+
+    // STRING
     if (t.kind == TokenKind::String) {
         auto tok = get();
         auto e = std::make_unique<Expression>(ExprKind::String);
@@ -609,20 +790,24 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         e->literal = tok.text;
         return e;
     }
+
+    // ( expression )
     if (isSymbol("(")) {
         get();
         auto e = parseExpression();
         expect(TokenKind::Symbol, ")");
         return e;
     }
+
+    // { ... } concatenation / replication
     if (isSymbol("{")) {
         return parseConcatenationOrReplication();
     }
 
-    throw std::runtime_error("Expected expression near token '" +
-                             t.text + "' at " + t.loc.file + ":" +
-                             std::to_string(t.loc.line) + ":" +
-                             std::to_string(t.loc.column));
+    throw std::runtime_error(
+        "Expected expression near token '" + t.text + "' at " +
+        t.loc.file + ":" + std::to_string(t.loc.line) + ":" +
+        std::to_string(t.loc.column));
 }
 
 std::unique_ptr<Expression> Parser::parseConcatenationOrReplication() {
@@ -730,5 +915,106 @@ std::unique_ptr<Expression> Parser::parseTernaryRHS(std::unique_ptr<Expression> 
     e->else_expr = std::move(elseExpr);
     return e;
 }
+
+std::unique_ptr<ModuleItem> Parser::parseGenerateConstruct() {
+    auto genTok = expect(TokenKind::Keyword, "generate");
+
+    auto gc = std::make_unique<GenerateConstruct>();
+    gc->item = parseGenerateItem();
+
+    expect(TokenKind::Keyword, "endgenerate");
+
+    auto item = std::make_unique<ModuleItem>(ModuleItemKind::Generate);
+    item->gen = std::move(gc);
+    return item;
+}
+
+std::unique_ptr<GenerateItem> Parser::parseGenerateItem() {
+    // robust: handle 'for' whether lexer marks it as Keyword or Identifier
+    if (peek().text == "for") {
+        return parseGenerateFor();
+    }
+
+    const Token &t = peek();
+    throw std::runtime_error(
+        "Unsupported generate item near token '" + t.text + "' at " +
+        t.loc.file + ":" + std::to_string(t.loc.line) + ":" +
+        std::to_string(t.loc.column));
+}
+
+std::unique_ptr<GenerateItem> Parser::parseGenerateFor() {
+    // accept 'for' whether lexer marks it as Keyword or Identifier
+    if (peek().text != "for") {
+        const Token &t = peek();
+        throw std::runtime_error(
+            "Expected 'for' in generate-for, got '" + t.text + "'");
+    }
+    get(); // consume 'for'
+
+    expect(TokenKind::Symbol, "(");
+
+    // --- genvar assignment parser ---
+    auto parseGenvarAssign = [&]() {
+        auto lhsTok = expect(TokenKind::Identifier);
+        expect(TokenKind::Symbol, "=");
+        auto rhs = parseExpression();
+
+        auto assign = std::make_unique<Expression>(ExprKind::Binary);
+        assign->loc = lhsTok.loc;
+        assign->binary_op = BinaryOp::Assign;
+
+        auto lhs = std::make_unique<Expression>(ExprKind::Identifier);
+        lhs->loc = lhsTok.loc;
+        lhs->ident = lhsTok.text;
+
+        assign->lhs = std::move(lhs);
+        assign->rhs = std::move(rhs);
+        return assign;
+    };
+
+    // init
+    auto init = parseGenvarAssign();
+    expect(TokenKind::Symbol, ";");
+
+    // cond (normal expression)
+    auto cond = parseExpression();
+    expect(TokenKind::Symbol, ";");
+
+    // step
+    auto step = parseGenvarAssign();
+    expect(TokenKind::Symbol, ")");
+
+    // begin : label
+    expect(TokenKind::Keyword, "begin");
+
+    std::string label;
+    if (isSymbol(":")) {
+        get();
+        label = expect(TokenKind::Identifier).text;
+    }
+
+    auto block = std::make_unique<GenerateBlock>();
+    block->name = label;
+
+    while (!(peek().text == "end" || peek().text == "endgenerate")) {
+        block->items.push_back(parseModuleItem());
+    }
+
+    expect(TokenKind::Keyword, "end");
+
+    auto gi = std::make_unique<GenerateItem>(GenItemKind::For);
+    gi->for_init = std::move(init);
+    gi->for_cond = std::move(cond);
+    gi->for_step = std::move(step);
+
+    gi->for_body = std::make_unique<GenerateItem>(GenItemKind::Block);
+    gi->for_body->block = std::move(block);
+
+    // extract genvar name
+    gi->genvar_name = gi->for_init->lhs->ident;
+
+    return gi;
+}
+
 
 } // namespace sv

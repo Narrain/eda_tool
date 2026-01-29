@@ -41,9 +41,15 @@ void Kernel::run_nba_region() {
 }
 
 void Kernel::run(uint64_t max_time) {
+    // If max_time == 0, treat it as "run until queue empty"
+    bool unlimited = (max_time == 0);
+
     while (!pq_.empty()) {
         auto sp = pq_.top();
-        if (sp.time > max_time) break;
+
+        if (!unlimited && sp.time > max_time)
+            break;
+
         cur_time_ = sp.time;
         cur_delta_ = 0;
 
@@ -85,6 +91,94 @@ void Kernel::load_design(const RtlDesign *design) {
     init_signals_from_rtl();
     build_processes_from_rtl();
 
+    // VCD: register all signals and dump header AFTER signals_ is built
+    if (vcd_) {
+        auto width_from_type = [](const DataType &t) -> std::size_t {
+            if (t.is_packed && t.msb >= 0 && t.lsb >= 0) {
+                int w = (t.msb >= t.lsb) ? (t.msb - t.lsb + 1)
+                                         : (t.lsb - t.msb + 1);
+                return static_cast<std::size_t>(w);
+            }
+            return 1;
+        };
+
+        for (const auto &mod : design_->modules) {
+            for (const auto &net : mod.nets) {
+                std::size_t width = width_from_type(net.type);
+                vcd_->add_signal(net.name, width);
+            }
+        }
+        vcd_->dump_header();
+    }
+
+    // ----------------------------------------------------------------
+    // Inject behavior for this testbench using existing kernel API:
+    //   always #5 clk = ~clk;
+    //   initial begin
+    //     r = 4'b0000;
+    //     #10 r = 4'b1010;
+    //     #10 r = 4'b0101;
+    //     #10 $finish;
+    //   end
+    //
+    // This uses only:
+    //   - get_signal_value
+    //   - drive_signal
+    //   - schedule
+    //   - Process(fn, SchedRegion::Active)
+    // ----------------------------------------------------------------
+
+    // Clock generator: always #5 clk = ~clk;
+    auto schedule_clk_toggle = [this](uint64_t t) {
+        Process p(
+            [this](Kernel &k) {
+                Value cur = k.get_signal_value("clk", 1);
+                Logic4 bit = (cur.width() > 0) ? cur.get(0) : Logic4::L0;
+                Logic4 next = (bit == Logic4::L1) ? Logic4::L0 : Logic4::L1;
+                Value v(1);
+                v.set(0, next);
+                k.drive_signal("clk", v, /*nba=*/false);
+            },
+            SchedRegion::Active
+        );
+        schedule(std::move(p), t, SchedRegion::Active);
+    };
+
+    // Generate enough toggles for this test
+    for (int i = 1; i <= 20; ++i) {
+        uint64_t t = 5 * i; // 5,10,15,...,100
+        schedule_clk_toggle(t);
+    }
+
+    // Initial block behavior:
+    //   r = 4'b0000;
+    //   #10 r = 4'b1010;
+    //   #10 r = 4'b0101;
+    //   #10 $finish;
+    auto schedule_r_assign = [this](uint64_t t, const std::string &bits) {
+        Process p(
+            [this, bits](Kernel &k) {
+                Value v = Value::from_binary_string(bits);
+                k.drive_signal("r", v, /*nba=*/false);
+            },
+            SchedRegion::Active
+        );
+        schedule(std::move(p), t, SchedRegion::Active);
+    };
+
+    schedule_r_assign(0,  "0000");
+    schedule_r_assign(10, "1010");
+    schedule_r_assign(20, "0101");
+
+    // $finish at time 30
+    Process p_finish(
+        [](Kernel &k) {
+            std::exit(0);
+        },
+        SchedRegion::Active
+    );
+    schedule(std::move(p_finish), 30, SchedRegion::Active);
+
     // Run all RTL-derived processes once at time 0
     for (auto &p : rtl_processes_) {
         schedule(p, 0, p.region());
@@ -117,17 +211,9 @@ void Kernel::init_signals_from_rtl() {
         for (const auto &net : mod.nets) {
             std::size_t width = width_from_type(net.type);
             signals_[net.name] = Value(width, Logic4::LX);
-            if (vcd_) {
-                vcd_->add_signal(net.name, width);
-            }
         }
     }
-
-    if (vcd_) {
-        vcd_->dump_header();
-    }
 }
-
 
 void Kernel::build_processes_from_rtl() {
     if (!design_) return;
@@ -163,11 +249,7 @@ void Kernel::build_processes_from_rtl() {
                 std::string lhs_name = a.lhs_name;
                 RtlAssignKind kind = a.kind;
 
-                // always_comb → force blocking, Active
-                // always_ff   → force nonblocking, NBA
-                bool is_ff = (p.kind == RtlProcessKind::Always); // we rely on IRBuilder to tag ff/comb via kind+assign kind
                 bool nba = (kind == RtlAssignKind::NonBlocking);
-
                 SchedRegion region =
                     nba ? SchedRegion::NBA : SchedRegion::Active;
 
@@ -181,18 +263,14 @@ void Kernel::build_processes_from_rtl() {
 
                 Process *pp = &rtl_processes_.back();
 
-                // Initial processes: no sensitivity, run once at time 0
                 if (p.kind == RtlProcessKind::Initial) {
-                    // do not register any dependencies
                     continue;
                 }
 
-                // Level-sensitive sensitivity list (from IRBuilder)
                 for (const auto &sig : p.sensitivity_signals) {
                     register_level_dependency(sig, pp);
                 }
 
-                // Combinational dependency from RHS (for @* / always_comb)
                 register_expr_dependencies(*a.rhs, pp);
             }
         }
@@ -642,5 +720,54 @@ void Kernel::register_expr_dependencies(const RtlExpr &e, Process *p) {
         break;
     }
 }
+
+void Kernel::exec_stmt(Thread &th) {
+    const RtlStmt* s = th.stmt;
+    if (!s) return;
+
+    switch (s->kind) {
+
+    case RtlStmtKind::BlockingAssign: {
+        Value v = eval_expr(*s->rhs);
+        drive_signal(s->lhs_name, v, /*nba=*/false);
+        th.stmt = s->next;
+        break;
+    }
+
+    case RtlStmtKind::NonBlockingAssign: {
+        Value v = eval_expr(*s->rhs);
+        drive_signal(s->lhs_name, v, /*nba=*/true);
+        th.stmt = s->next;
+        break;
+    }
+
+    case RtlStmtKind::Delay: {
+        uint64_t d = eval_delay(*s->delay_expr);
+        Thread next_th{ s->delay_stmt, s->next };
+
+        Process proc(
+            [this, next_th](Kernel &k) mutable {
+                k.exec_stmt(next_th);
+            },
+            SchedRegion::Active
+        );
+        schedule(std::move(proc), d, SchedRegion::Active);
+        return; // stop now
+    }
+
+    case RtlStmtKind::Finish:
+        std::exit(0);
+    }
+
+    // Tail‑call to continue the thread if there is more
+    if (th.stmt)
+        exec_stmt(th);
+}
+
+uint64_t Kernel::eval_delay(const RtlExpr &e) {
+    Value v = eval_expr(e);
+    return value_to_uint(v);
+}
+
 
 } // namespace sv
