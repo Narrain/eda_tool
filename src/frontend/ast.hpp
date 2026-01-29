@@ -265,7 +265,8 @@ enum class ModuleItemKind {
     ContinuousAssign,
     Always,
     Initial,
-    Instance
+    Instance,
+    Generate
 };
 
 struct InstancePortConn {
@@ -273,11 +274,61 @@ struct InstancePortConn {
     std::unique_ptr<Expression> expr;
 };
 
+struct ParamOverride {
+    std::string name;                       // .WIDTH
+    std::unique_ptr<Expression> value;      // .WIDTH(8)
+};
+
 struct Instance : Node {
     std::string module_name;
     std::string instance_name;
+    std::vector<ParamOverride> param_overrides;
     std::vector<InstancePortConn> port_conns;
 };
+
+enum class GenItemKind {
+    Block,
+    If,
+    For,
+    Case
+};
+
+struct ModuleItem;
+
+struct GenerateBlock : Node {
+    std::string name; // optional
+    std::vector<std::unique_ptr<ModuleItem>> items;
+};
+
+struct GenerateItem : Node {
+    GenItemKind kind;
+
+    // Block
+    std::unique_ptr<GenerateBlock> block;
+
+    // If
+    std::unique_ptr<Expression> if_cond;
+    std::unique_ptr<GenerateItem> if_then;
+    std::unique_ptr<GenerateItem> if_else;
+
+    // For
+    std::string genvar_name;
+    std::unique_ptr<Expression> for_init;
+    std::unique_ptr<Expression> for_cond;
+    std::unique_ptr<Expression> for_step;
+    std::unique_ptr<GenerateItem> for_body;
+
+    // Case
+    std::unique_ptr<Expression> case_expr;
+    std::vector<CaseItem> case_items;
+
+    explicit GenerateItem(GenItemKind k) : kind(k) {}
+};
+
+struct GenerateConstruct : Node {
+    std::unique_ptr<GenerateItem> item;
+};
+
 
 struct ModuleItem : Node {
     ModuleItemKind kind;
@@ -288,6 +339,9 @@ struct ModuleItem : Node {
     std::unique_ptr<AlwaysConstruct> always;
     std::unique_ptr<InitialConstruct> initial;
     std::unique_ptr<Instance> instance;
+
+    // NEW:
+    std::unique_ptr<GenerateConstruct> gen;
 
     explicit ModuleItem(ModuleItemKind k) : kind(k) {}
 };

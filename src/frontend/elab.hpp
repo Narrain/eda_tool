@@ -8,6 +8,7 @@
 
 #include "ast.hpp"
 #include "symbol_table.hpp"
+#include "const_eval.hpp"
 
 namespace sv {
 
@@ -36,6 +37,7 @@ struct ElabModule {
 struct ElabInstance {
     std::string module_name;
     std::string instance_name;
+    std::vector<ElabParam> params;
     std::vector<std::pair<std::string, std::string>> port_conns; // port -> signal
 };
 
@@ -49,12 +51,13 @@ public:
         : design_(design), symtab_(symtab) {}
 
     ElaboratedDesign elaborate();
+    void elaborateModule(const ModuleDecl &mod, ElaboratedDesign &out);
 
 private:
     const Design &design_;
     const SymbolTable &symtab_;
 
-    void elaborateModule(const ModuleDecl &mod, ElaboratedDesign &out);
+    void elaborateGenerate(const GenerateItem &gi, const ConstEnv &env, std::vector<const ModuleItem*> &out_items);
 };
 
 } // namespace sv

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <stdexcept>
 
+#include <unordered_map>
+
 namespace sv {
 
 struct ConstValue {
@@ -12,9 +14,11 @@ struct ConstValue {
     int64_t value = 0;
 };
 
+using ConstEnv = std::unordered_map<std::string, int64_t>;
+
 class ConstEval {
 public:
-    ConstValue eval(const Expression &e) {
+    ConstValue eval(const Expression &e, const ConstEnv &env) {
         switch (e.kind) {
         case ExprKind::Number: {
             ConstValue cv;
@@ -22,33 +26,41 @@ public:
             cv.value = parse_int(e.literal);
             return cv;
         }
+        case ExprKind::Identifier: {
+            auto it = env.find(e.ident);
+            if (it == env.end()) return {};
+            ConstValue cv;
+            cv.valid = true;
+            cv.value = it->second;
+            return cv;
+        }
         case ExprKind::Unary: {
             if (!e.unary_operand) return {};
-            ConstValue op = eval(*e.unary_operand);
+            ConstValue op = eval(*e.unary_operand, env);
             if (!op.valid) return {};
             ConstValue cv;
             cv.valid = true;
             switch (e.unary_op) {
-            case UnaryOp::Plus:  cv.value = +op.value; break;
-            case UnaryOp::Minus: cv.value = -op.value; break;
-            case UnaryOp::LogicalNot: cv.value = !op.value; break;
-            case UnaryOp::BitNot: cv.value = ~op.value; break;
+            case UnaryOp::Plus:        cv.value = +op.value; break;
+            case UnaryOp::Minus:       cv.value = -op.value; break;
+            case UnaryOp::LogicalNot:  cv.value = !op.value; break;
+            case UnaryOp::BitNot:      cv.value = ~op.value; break;
             }
             return cv;
         }
         case ExprKind::Binary: {
             if (!e.lhs || !e.rhs) return {};
-            ConstValue l = eval(*e.lhs);
-            ConstValue r = eval(*e.rhs);
+            ConstValue l = eval(*e.lhs, env);
+            ConstValue r = eval(*e.rhs, env);
             if (!l.valid || !r.valid) return {};
             ConstValue cv;
             cv.valid = true;
             switch (e.binary_op) {
-            case BinaryOp::Add:  cv.value = l.value + r.value; break;
-            case BinaryOp::Sub:  cv.value = l.value - r.value; break;
-            case BinaryOp::Mul:  cv.value = l.value * r.value; break;
-            case BinaryOp::Div:  cv.value = (r.value ? l.value / r.value : 0); break;
-            case BinaryOp::Mod:  cv.value = (r.value ? l.value % r.value : 0); break;
+            case BinaryOp::Add:   cv.value = l.value + r.value; break;
+            case BinaryOp::Sub:   cv.value = l.value - r.value; break;
+            case BinaryOp::Mul:   cv.value = l.value * r.value; break;
+            case BinaryOp::Div:   cv.value = (r.value ? l.value / r.value : 0); break;
+            case BinaryOp::Mod:   cv.value = (r.value ? l.value % r.value : 0); break;
 
             case BinaryOp::BitAnd: cv.value = l.value & r.value; break;
             case BinaryOp::BitOr:  cv.value = l.value | r.value; break;
@@ -57,12 +69,12 @@ public:
             case BinaryOp::LogicalAnd: cv.value = (l.value != 0) && (r.value != 0); break;
             case BinaryOp::LogicalOr:  cv.value = (l.value != 0) || (r.value != 0); break;
 
-            case BinaryOp::Eq:  cv.value = (l.value == r.value); break;
-            case BinaryOp::Neq: cv.value = (l.value != r.value); break;
-            case BinaryOp::Lt:  cv.value = (l.value <  r.value); break;
-            case BinaryOp::Gt:  cv.value = (l.value >  r.value); break;
-            case BinaryOp::Le:  cv.value = (l.value <= r.value); break;
-            case BinaryOp::Ge:  cv.value = (l.value >= r.value); break;
+            case BinaryOp::Eq:   cv.value = (l.value == r.value); break;
+            case BinaryOp::Neq:  cv.value = (l.value != r.value); break;
+            case BinaryOp::Lt:   cv.value = (l.value <  r.value); break;
+            case BinaryOp::Gt:   cv.value = (l.value >  r.value); break;
+            case BinaryOp::Le:   cv.value = (l.value <= r.value); break;
+            case BinaryOp::Ge:   cv.value = (l.value >= r.value); break;
 
             case BinaryOp::Shl:  cv.value = (l.value << (r.value & 63)); break;
             case BinaryOp::Shr:
@@ -77,9 +89,10 @@ public:
         }
         case ExprKind::Ternary: {
             if (!e.cond || !e.then_expr || !e.else_expr) return {};
-            ConstValue c = eval(*e.cond);
+            ConstValue c = eval(*e.cond, env);
             if (!c.valid) return {};
-            return c.value ? eval(*e.then_expr) : eval(*e.else_expr);
+            return c.value ? eval(*e.then_expr, env)
+                           : eval(*e.else_expr, env);
         }
         default:
             return {};
@@ -88,7 +101,6 @@ public:
 
 private:
     static int64_t parse_int(const std::string &s) {
-        // very simple: decimal only for now
         return static_cast<int64_t>(std::strtoll(s.c_str(), nullptr, 10));
     }
 };
