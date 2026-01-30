@@ -189,8 +189,6 @@ struct RtlStmt {
     {
         if (o.rhs)        rhs        = std::make_unique<RtlExpr>(*o.rhs);
         if (o.delay_expr) delay_expr = std::make_unique<RtlExpr>(*o.delay_expr);
-        // NOTE: delay_stmt/next are pointers within a block; they are
-        // re‑wired when building the block, not copied blindly.
     }
 
     RtlStmt &operator=(const RtlStmt &o) {
@@ -217,27 +215,24 @@ enum class RtlProcessKind {
     Always
 };
 
-
 struct RtlProcess {
     RtlProcessKind kind{};
     std::vector<RtlAssign> assigns;
-
-    // For event‑driven scheduling
     std::vector<std::string> sensitivity_signals;
 
-    // NEW: procedural body (for initial/always)
+    // Procedural body
     RtlStmt* first_stmt = nullptr;
-    std::vector<std::unique_ptr<RtlStmt>> stmts; // owns the statements
+    std::vector<std::unique_ptr<RtlStmt>> stmts; // owns statements
 
     RtlProcess() = default;
 
-    // deep copy
+    // deep copy that preserves first_stmt mapping
     RtlProcess(const RtlProcess &o)
         : kind(o.kind),
           assigns(o.assigns),
-          sensitivity_signals(o.sensitivity_signals)
+          sensitivity_signals(o.sensitivity_signals),
+          first_stmt(nullptr)
     {
-        // Copy stmts, then re‑wire first_stmt/next/delay_stmt later
         stmts.reserve(o.stmts.size());
         for (const auto &up : o.stmts) {
             if (up)
@@ -245,7 +240,15 @@ struct RtlProcess {
             else
                 stmts.push_back(nullptr);
         }
-        first_stmt = nullptr; // will be set by whoever builds the process
+
+        if (o.first_stmt) {
+            for (std::size_t i = 0; i < o.stmts.size(); ++i) {
+                if (o.stmts[i] && o.stmts[i].get() == o.first_stmt) {
+                    first_stmt = stmts[i].get();
+                    break;
+                }
+            }
+        }
     }
 
     RtlProcess &operator=(const RtlProcess &o) {
@@ -262,7 +265,17 @@ struct RtlProcess {
             else
                 stmts.push_back(nullptr);
         }
+
         first_stmt = nullptr;
+        if (o.first_stmt) {
+            for (std::size_t i = 0; i < o.stmts.size(); ++i) {
+                if (o.stmts[i] && o.stmts[i].get() == o.first_stmt) {
+                    first_stmt = stmts[i].get();
+                    break;
+                }
+            }
+        }
+
         return *this;
     }
 

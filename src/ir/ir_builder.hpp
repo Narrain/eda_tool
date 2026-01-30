@@ -33,6 +33,10 @@ private:
 
     std::unique_ptr<RtlExpr> lowerExpr(const Expression &e);
     RtlAssign lowerAssign(const Statement &s, RtlAssignKind kind);
+
+    // Build a procedural body for a process:
+    // returns the head RtlStmt* and fills p.stmts with owned nodes.
+    RtlStmt* build_proc_body(const Statement &body, RtlProcess &p);
 };
 
 } // namespace sv

@@ -19,18 +19,46 @@ int main(int argc, char **argv) {
     using namespace sv;
 
     if (argc < 2) {
-        std::cerr << "Usage: svtool <verilog-file>\n";
+        std::cerr << "Usage: svtool [--vcd=FILE] [--max=N] <verilog-file>\n";
         return 1;
     }
 
-    std::string filename = argv[1];
+    // -----------------------------
+    // CLI parsing
+    // -----------------------------
+    std::string vcd_filename = "";
+    uint64_t max_time = 0;   // 0 = unlimited
+    std::string verilog_file = "";
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+
+        if (arg.rfind("--vcd=", 0) == 0) {
+            vcd_filename = arg.substr(6);
+        }
+        else if (arg.rfind("--max=", 0) == 0) {
+            max_time = std::stoull(arg.substr(6));
+        }
+        else if (arg[0] == '-') {
+            std::cerr << "Unknown option: " << arg << "\n";
+            return 1;
+        }
+        else {
+            verilog_file = arg;
+        }
+    }
+
+    if (verilog_file.empty()) {
+        std::cerr << "Error: no Verilog file provided.\n";
+        return 1;
+    }
 
     // -----------------------------
     // Read source file
     // -----------------------------
-    std::ifstream in(filename);
+    std::ifstream in(verilog_file);
     if (!in) {
-        std::cerr << "Error: cannot open " << filename << "\n";
+        std::cerr << "Error: cannot open " << verilog_file << "\n";
         return 1;
     }
     std::stringstream buffer;
@@ -40,7 +68,7 @@ int main(int argc, char **argv) {
     // -----------------------------
     // Frontend: lex + parse
     // -----------------------------
-    Lexer lex(filename, source);
+    Lexer lex(verilog_file, source);
     std::vector<Token> tokens;
     try {
         tokens = lex.lex();
@@ -82,29 +110,72 @@ int main(int argc, char **argv) {
     // IR build
     // -----------------------------
     IRBuilder irb(*design, ed, symtab);
-    RtlDesign rd = irb.build();
+    RtlDesign rd = irb.build();   // this one is for simulation
+
+    for (const auto &m : rd.modules) {
+        std::cout << "MODULE " << m.name << "\n";
+        for (const auto &p : m.processes) {
+            std::cout << "  PROCESS kind=" << int(p.kind)
+                      << " assigns=" << p.assigns.size()
+                      << " first_stmt=" << (p.first_stmt ? "YES" : "NO")
+                      << "\n";
+        }
+    }
 
     // -----------------------------
-    // Synthesis
+    // Synthesis on a separate copy
     // -----------------------------
-    SynthDriver sd(rd);
+    RtlDesign rd_for_synth = rd;   // deep copy, keeps first_stmt mapping
+    SynthDriver sd(rd_for_synth);
     NetlistDesign nd = sd.run();
-    (void)nd; // not printed yet
+    (void)nd;
 
     // -----------------------------
     // Simulation + VCD
     // -----------------------------
     Kernel k;
 
-    VcdWriter vcd("wave.vcd");
-    if (vcd.good()) {
-        k.set_vcd(&vcd);
+    VcdWriter vcd(vcd_filename);
+    if (!vcd_filename.empty()) {
+        if (vcd.good()) {
+            k.set_vcd(&vcd);
+        } else {
+            std::cerr << "Warning: cannot open VCD file '"
+                      << vcd_filename << "'\n";
+        }
     }
 
-    k.load_design(&rd);    // <-- move this *after* set_vcd()
+    // Let kernel initialize signals and VCD header
+    k.load_design(&rd);
 
-    // Run a small simulation window
-    k.run(10);
+    // Explicitly schedule all RTL processes at time 0,
+    // driving their procedural bodies directly.
+    for (const auto &mod : rd.modules) {
+        for (const auto &rp : mod.processes) {
+            const RtlProcess *proc_ptr = &rp;
+
+            Process proc(
+                [proc_ptr](Kernel &kk) {
+                    if (proc_ptr->first_stmt) {
+                        Thread th{
+                            proc_ptr->first_stmt,
+                            nullptr,
+                            proc_ptr,
+                            proc_ptr->first_stmt
+                        };
+                        kk.exec_stmt(th);
+                    }
+                    // No fallback: we only care about procedural bodies here.
+                },
+                SchedRegion::Active
+            );
+
+            k.schedule(std::move(proc), 0, SchedRegion::Active);
+        }
+    }
+
+    // Run simulation
+    k.run(max_time);
 
     // -----------------------------
     // Coverage
@@ -121,9 +192,6 @@ int main(int argc, char **argv) {
         return true;
     }));
 
-    // Run a small simulation window
-    k.run(10);
-
     bool sva_ok = sva.check_all(k);
 
     // -----------------------------
@@ -137,7 +205,9 @@ int main(int argc, char **argv) {
     }
 
     std::cout << "SVA: " << (sva_ok ? "PASS" : "FAIL") << "\n";
-    std::cout << "VCD written to wave.vcd (if VCD file opened successfully)\n";
+
+    if (!vcd_filename.empty())
+        std::cout << "VCD written to " << vcd_filename << "\n";
 
     return sva_ok ? 0 : 2;
 }

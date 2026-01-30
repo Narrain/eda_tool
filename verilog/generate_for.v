@@ -1,21 +1,30 @@
 module top;
-  reg clk = 0;
-  reg [3:0] r;
 
-  // generate-for just to exercise elaboration
-  genvar i;
-  for (i = 0; i < 4; i = i + 1) begin : genblk
-    wire w;
-    assign w = r[i];
+  reg clk;
+  reg [3:0] r;
+  wire [3:0] w;
+
+  assign w = r;
+
+  // clock generator
+  always begin
+    #5 clk = 1;
+    #5 clk = 0;
   end
 
-  // real activity
-  always #5 clk = ~clk;
+  genvar i;
+  generate
+    for (i = 0; i < 4; i = i + 1) begin : gen_blk
+      always @(posedge clk) begin
+        r[i] <= ~r[i];
+      end
+    end
+  endgenerate
 
   initial begin
     r = 4'b0000;
-    #10 r = 4'b1010;
-    #10 r = 4'b0101;
-    #10 $finish;
+    #50;
+    $finish;
   end
+
 endmodule

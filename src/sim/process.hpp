@@ -1,15 +1,13 @@
-// path: src/sim/process.hpp
 #ifndef __PROCESS_HPP__
 #define __PROCESS_HPP__
 
 #include <functional>
-#include <cstdint>
 
 namespace sv {
 
 class Kernel;
 
-// A simple process abstraction: a callback that runs in a scheduling region.
+// Scheduling regions for processes
 enum class SchedRegion {
     Preponed,
     Active,
@@ -23,6 +21,7 @@ using ProcessFunc = std::function<void(Kernel &)>;
 class Process {
 public:
     Process() = default;
+
     Process(ProcessFunc fn, SchedRegion region)
         : fn_(std::move(fn)), region_(region) {}
 
