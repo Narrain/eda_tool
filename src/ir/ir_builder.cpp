@@ -68,10 +68,22 @@ RtlModule IRBuilder::buildModule(const ModuleDecl &mod) {
     RtlModule out;
     out.name = mod.name;
 
+    const auto &em = elab_.modules.at(mod.name);
+
+    // Params and nets still come from original mod
     collectParams(mod, out);
     collectNets(mod, out);
     collectContinuousAssigns(mod, out);
-    collectProcesses(mod, out);
+
+    // PROCESSES MUST COME FROM ELABORATED MODULE
+    for (const ModuleItem *item : em.flat_items) {
+        if (item->kind == ModuleItemKind::Always && item->always)
+            collectProcessFromAlways(*item->always, out);
+        else if (item->kind == ModuleItemKind::Initial && item->initial)
+            collectProcessFromInitial(*item->initial, out);
+    }
+
+    // Instances still from original mod
     collectInstances(mod, out);
 
     return out;

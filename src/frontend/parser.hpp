@@ -17,7 +17,9 @@ public:
     std::unique_ptr<ModuleItem> parseGenerateConstruct();
     std::unique_ptr<GenerateItem> parseGenerateItem();
     std::unique_ptr<GenerateItem> parseGenerateFor();
+    std::unique_ptr<GenerateItem> parseGenerateBlock();
 
+    void skipGenerateJunk();
 
 private:
     const std::vector<Token> &tokens_;

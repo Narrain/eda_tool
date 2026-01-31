@@ -922,13 +922,33 @@ std::unique_ptr<Expression> Parser::parseTernaryRHS(std::unique_ptr<Expression> 
 // generate constructs
 // -----------------------------------------------------
 
+// Helper: skip stray whitespace identifiers (tabs/spaces)
+// Your lexer treats tabs as identifiers, so we must filter them.
+inline void Parser::skipGenerateJunk() {
+    while (match(TokenKind::Identifier)) {
+        const std::string &txt = peek().text;
+        bool all_ws = true;
+        for (char c : txt) {
+            if (c != ' ' && c != '\t') {
+                all_ws = false;
+                break;
+            }
+        }
+        if (!all_ws) break;
+        get(); // consume junk token
+    }
+}
+
 std::unique_ptr<ModuleItem> Parser::parseGenerateConstruct() {
     auto genTok = expect(TokenKind::Keyword, "generate");
 
+    skipGenerateJunk();
+
     auto gc = std::make_unique<GenerateConstruct>();
-    gc->loc = genTok.loc;
+    gc->loc  = genTok.loc;
     gc->item = parseGenerateItem();
 
+    skipGenerateJunk();
     expect(TokenKind::Keyword, "endgenerate");
 
     auto item = std::make_unique<ModuleItem>(ModuleItemKind::Generate);
@@ -938,10 +958,13 @@ std::unique_ptr<ModuleItem> Parser::parseGenerateConstruct() {
 }
 
 std::unique_ptr<GenerateItem> Parser::parseGenerateItem() {
-    // For now we only support: for (...) begin ... end
-    if (peek().text == "for") {
+    skipGenerateJunk();
+
+    if (peek().text == "for")
         return parseGenerateFor();
-    }
+
+    if (match(TokenKind::Keyword, "begin"))
+        return parseGenerateBlock();
 
     const Token &t = peek();
     throw std::runtime_error(
@@ -950,88 +973,164 @@ std::unique_ptr<GenerateItem> Parser::parseGenerateItem() {
         std::to_string(t.loc.column));
 }
 
-std::unique_ptr<GenerateItem> Parser::parseGenerateFor() {
-    if (peek().text != "for") {
-        const Token &t = peek();
-        throw std::runtime_error(
-            "Expected 'for' in generate-for, got '" + t.text + "'");
-    }
-    auto forTok = get(); // 'for' (identifier token)
-
-    expect(TokenKind::Symbol, "(");
-
-    // ----------------------------------------
-    // init: genvar_name = <expr>;
-    // ----------------------------------------
-    auto genvarTok = expect(TokenKind::Identifier);
-    std::string genvar_name = genvarTok.text;
-
-    expect(TokenKind::Symbol, "=");
-    auto init_expr = parseExpression();
-    expect(TokenKind::Symbol, ";");
-
-    // ----------------------------------------
-    // condition: <expr>;
-    // (we'll interpret it later as i < limit, etc.)
-    // ----------------------------------------
-    auto cond_expr = parseExpression();
-    expect(TokenKind::Symbol, ";");
-
-    // ----------------------------------------
-    // step: genvar_name = <expr>
-    // ----------------------------------------
-    auto step_lhs = expect(TokenKind::Identifier);
-    if (step_lhs.text != genvar_name) {
-        throw std::runtime_error(
-            "Generate-for step must assign to same genvar '" +
-            genvar_name + "'");
-    }
-    expect(TokenKind::Symbol, "=");
-    auto step_expr = parseExpression();
-
-    expect(TokenKind::Symbol, ")");
-
-    // ----------------------------------------
-    // body: begin [: label] <module items> end [: label]
-    // ----------------------------------------
+std::unique_ptr<GenerateItem> Parser::parseGenerateBlock() {
     auto beginTok = expect(TokenKind::Keyword, "begin");
 
-    // Optional label after 'begin'
     if (isSymbol(":")) {
-        get(); // ':'
-        expect(TokenKind::Identifier); // label name
+        get();
+        expect(TokenKind::Identifier);
     }
 
-    // Build a Block generate item to hold module items
-    auto body = std::make_unique<GenerateItem>(GenItemKind::Block);
-    body->loc = beginTok.loc;
-    body->block = std::make_unique<GenerateBlock>();
-    body->block->loc = beginTok.loc;
+    auto blk = std::make_unique<GenerateBlock>();
+    blk->loc = beginTok.loc;
+
+    skipGenerateJunk();
 
     while (!match(TokenKind::Keyword, "end")) {
-        // Reuse normal module-item parser inside the generate block
-        body->block->items.push_back(parseModuleItem());
+        skipGenerateJunk();
+
+        if (isSymbol(";")) {
+            get();
+            continue;
+        }
+
+        if (peek().text == "for") {
+            auto gc = std::make_unique<GenerateConstruct>();
+            gc->loc  = peek().loc;
+            gc->item = parseGenerateFor();
+
+            auto mi = std::make_unique<ModuleItem>(ModuleItemKind::Generate);
+            mi->loc = gc->loc;
+            mi->gen = std::move(gc);
+            blk->items.push_back(std::move(mi));
+            continue;
+        }
+
+        if (match(TokenKind::Keyword, "generate")) {
+            blk->items.push_back(parseGenerateConstruct());
+            continue;
+        }
+
+        blk->items.push_back(parseModuleItem());
     }
 
     expect(TokenKind::Keyword, "end");
 
-    // Optional label after 'end' (end : gen_blk)
     if (isSymbol(":")) {
-        get(); // ':'
-        expect(TokenKind::Identifier); // label name
+        get();
+        expect(TokenKind::Identifier);
     }
 
-    // ----------------------------------------
-    // Build the For generate item
-    // ----------------------------------------
-    auto gi = std::make_unique<GenerateItem>(GenItemKind::For);
-    gi->loc = forTok.loc;
-    gi->genvar_name = genvar_name;
-    gi->for_init = std::move(init_expr);
-    gi->for_cond = std::move(cond_expr);
-    gi->for_step = std::move(step_expr);
-    gi->for_body = std::move(body);
+    auto gi = std::make_unique<GenerateItem>(GenItemKind::Block);
+    gi->loc   = beginTok.loc;
+    gi->block = std::move(blk);
+    return gi;
+}
 
+std::unique_ptr<GenerateItem> Parser::parseGenerateFor() {
+    auto forTok = expect(TokenKind::Identifier, "for");
+
+    expect(TokenKind::Symbol, "(");
+
+    // -----------------------------
+    // init: i = <expr>;
+    // -----------------------------
+    auto init_lhs_tok = expect(TokenKind::Identifier);
+    std::string genvar_name = init_lhs_tok.text;
+
+    expect(TokenKind::Symbol, "=");
+    auto init_rhs = parseExpression();
+    expect(TokenKind::Symbol, ";");
+
+    auto init_expr = std::make_unique<Expression>(ExprKind::Binary);
+    init_expr->loc       = init_lhs_tok.loc;
+    init_expr->binary_op = BinaryOp::Assign;
+
+    auto init_lhs = std::make_unique<Expression>(ExprKind::Identifier);
+    init_lhs->loc   = init_lhs_tok.loc;
+    init_lhs->ident = init_lhs_tok.text;
+
+    init_expr->lhs = std::move(init_lhs);
+    init_expr->rhs = std::move(init_rhs);
+
+    // -----------------------------
+    // cond: i < <expr>;
+    // -----------------------------
+    auto cond_lhs_tok = expect(TokenKind::Identifier);
+    expect(TokenKind::Symbol, "<");
+    auto cond_rhs = parseExpression();
+    expect(TokenKind::Symbol, ";");
+
+    auto cond_expr = std::make_unique<Expression>(ExprKind::Binary);
+    cond_expr->loc       = cond_lhs_tok.loc;
+    cond_expr->binary_op = BinaryOp::Lt;
+
+    auto cond_lhs = std::make_unique<Expression>(ExprKind::Identifier);
+    cond_lhs->loc   = cond_lhs_tok.loc;
+    cond_lhs->ident = cond_lhs_tok.text;
+
+    cond_expr->lhs = std::move(cond_lhs);
+    cond_expr->rhs = std::move(cond_rhs);
+
+    // -----------------------------
+    // step: i = i + <expr>
+    // -----------------------------
+    auto step_lhs_tok = expect(TokenKind::Identifier);
+    expect(TokenKind::Symbol, "=");
+    auto step_inner_lhs_tok = expect(TokenKind::Identifier);
+    expect(TokenKind::Symbol, "+");
+    auto step_rhs_rhs = parseExpression();
+    expect(TokenKind::Symbol, ")");
+
+    auto step_inner = std::make_unique<Expression>(ExprKind::Binary);
+    step_inner->loc       = step_inner_lhs_tok.loc;
+    step_inner->binary_op = BinaryOp::Add;
+
+    auto step_inner_lhs = std::make_unique<Expression>(ExprKind::Identifier);
+    step_inner_lhs->loc   = step_inner_lhs_tok.loc;
+    step_inner_lhs->ident = step_inner_lhs_tok.text;
+
+    step_inner->lhs = std::move(step_inner_lhs);
+    step_inner->rhs = std::move(step_rhs_rhs);
+
+    auto step_expr = std::make_unique<Expression>(ExprKind::Binary);
+    step_expr->loc       = step_lhs_tok.loc;
+    step_expr->binary_op = BinaryOp::Assign;
+
+    auto step_lhs = std::make_unique<Expression>(ExprKind::Identifier);
+    step_lhs->loc   = step_lhs_tok.loc;
+    step_lhs->ident = step_lhs_tok.text;
+
+    step_expr->lhs = std::move(step_lhs);
+    step_expr->rhs = std::move(step_inner);
+
+    // -----------------------------
+    // body
+    // -----------------------------
+    skipGenerateJunk();
+
+    std::unique_ptr<GenerateItem> body;
+
+    if (match(TokenKind::Keyword, "begin")) {
+        body = parseGenerateBlock();
+    } else {
+        auto blk = std::make_unique<GenerateBlock>();
+        blk->loc = peek().loc;
+        blk->items.push_back(parseModuleItem());
+
+        auto gi_block = std::make_unique<GenerateItem>(GenItemKind::Block);
+        gi_block->loc   = blk->loc;
+        gi_block->block = std::move(blk);
+        body = std::move(gi_block);
+    }
+
+    auto gi = std::make_unique<GenerateItem>(GenItemKind::For);
+    gi->loc         = forTok.loc;
+    gi->genvar_name = genvar_name;
+    gi->for_init    = std::move(init_expr);
+    gi->for_cond    = std::move(cond_expr);
+    gi->for_step    = std::move(step_expr);
+    gi->for_body    = std::move(body);
     return gi;
 }
 
