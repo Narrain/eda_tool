@@ -6,16 +6,16 @@
 
 namespace sv {
 
-// -------------------------
+// ============================================================================
 // Scheduling
-// -------------------------
+// ============================================================================
 
 void Kernel::schedule(Process proc, uint64_t delay, SchedRegion region) {
     ScheduledProcess sp;
-    sp.time = cur_time_ + delay;
-    sp.delta = (delay == 0) ? cur_delta_ : 0;
+    sp.time   = cur_time_ + delay;
+    sp.delta  = (delay == 0) ? cur_delta_ : 0;
     sp.region = region;
-    sp.proc = std::move(proc);
+    sp.proc   = std::move(proc);
     pq_.push(std::move(sp));
 }
 
@@ -44,39 +44,38 @@ void Kernel::run_active_region(uint64_t target_time) {
 
         cur_delta_++;
         cur.proc.run(*this);
+
+        if (stop_requested_)
+            break;
     }
 }
 
 void Kernel::run_nba_region() {
     if (nba_queue_.empty()) return;
+
     auto q = std::move(nba_queue_);
     nba_queue_.clear();
+
     for (auto &p : q) {
         p.run(*this);
+        if (stop_requested_)
+            break;
     }
 }
 
 void Kernel::run(uint64_t max_time) {
     bool unlimited = (max_time == 0);
+    stop_requested_ = false;
 
-    // Safety net: if for any reason nothing was scheduled yet,
-    // schedule all RTL processes at time 0 in their natural region.
-    if (pq_.empty()) {
-        for (auto &p : rtl_processes_) {
-            schedule(p, 0, p.region());
-        }
-    }
-
-    while (!pq_.empty()) {
+    while (!pq_.empty() && !stop_requested_) {
         const ScheduledProcess &sp = pq_.top();
 
         if (!unlimited && sp.time > max_time)
             break;
 
-        cur_time_ = sp.time;
+        cur_time_  = sp.time;
         cur_delta_ = 0;
 
-        // Dump VCD at start of this time
         if (vcd_) {
             vcd_->dump_time(cur_time_);
             for (const auto &kv : signals_) {
@@ -84,25 +83,17 @@ void Kernel::run(uint64_t max_time) {
             }
         }
 
-        // Run all Active/Preponed/Inactive at this time
         run_active_region(cur_time_);
+        if (stop_requested_) break;
 
-        // Run NBA region
         run_nba_region();
-
-        // Dump VCD again after all updates at this time
-        if (vcd_) {
-            vcd_->dump_time(cur_time_);
-            for (const auto &kv : signals_) {
-                vcd_->dump_value(kv.first, kv.second);
-            }
-        }
+        if (stop_requested_) break;
     }
 }
 
-// -------------------------
+// ============================================================================
 // Design load
-// -------------------------
+// ============================================================================
 
 void Kernel::load_design(const RtlDesign *design) {
     design_ = design;
@@ -115,6 +106,7 @@ void Kernel::load_design(const RtlDesign *design) {
     level_watchers_.clear();
     posedge_watchers_.clear();
     negedge_watchers_.clear();
+    stop_requested_ = false;
 
     if (!design_) return;
 
@@ -140,14 +132,15 @@ void Kernel::load_design(const RtlDesign *design) {
         vcd_->dump_header();
     }
 
+    // schedule all processes once at t=0
     for (auto &p : rtl_processes_) {
         schedule(p, 0, p.region());
     }
 }
 
-// -------------------------
+// ============================================================================
 // Signal init
-// -------------------------
+// ============================================================================
 
 void Kernel::init_signals_from_rtl() {
     if (!design_) return;
@@ -169,9 +162,9 @@ void Kernel::init_signals_from_rtl() {
     }
 }
 
-// -------------------------
+// ============================================================================
 // Build processes from RTL
-// -------------------------
+// ============================================================================
 
 void Kernel::build_processes_from_rtl() {
     if (!design_) return;
@@ -180,19 +173,17 @@ void Kernel::build_processes_from_rtl() {
 
     for (const auto &mod : design_->modules) {
 
-        // -------------------------
         // continuous assigns
-        // -------------------------
         for (const auto &a : mod.continuous_assigns) {
             if (!a.rhs) continue;
 
-            RtlExpr rhs_copy = *a.rhs;
+            const RtlExpr *rhs_ptr = a.rhs.get();
             std::string lhs_name = a.lhs_name;
 
             rtl_processes_.emplace_back(
                 Process(
-                    [this, lhs_name, rhs_copy](Kernel &k) {
-                        Value v = k.eval_expr(rhs_copy);
+                    [this, lhs_name, rhs_ptr](Kernel &k) {
+                        Value v = k.eval_expr(*rhs_ptr);
                         k.drive_signal(lhs_name, v, /*nba=*/false);
                     },
                     SchedRegion::Active
@@ -203,9 +194,7 @@ void Kernel::build_processes_from_rtl() {
             register_expr_dependencies(*a.rhs, pp);
         }
 
-        // -------------------------
         // always / initial
-        // -------------------------
         for (const auto &rp : mod.processes) {
             const RtlProcess *proc_ptr = &rp;
 
@@ -235,20 +224,40 @@ void Kernel::build_processes_from_rtl() {
 
             Process *pp = &rtl_processes_.back();
 
-            for (const auto &sig : rp.sensitivity_signals) {
-                register_level_dependency(sig, pp);
+            if (rp.kind == RtlProcessKind::Initial) {
+                // initial blocks run once at t=0; no sensitivity
+                continue;
+            }
+
+            if (!rp.sensitivity.empty()) {
+                for (const auto &s : rp.sensitivity) {
+                    if (s.kind == RtlSensitivity::Kind::Posedge) {
+                        register_posedge_dependency(s.signal, pp);
+                    } else if (s.kind == RtlSensitivity::Kind::Negedge) {
+                        register_negedge_dependency(s.signal, pp);
+                    } else {
+                        if (s.signal == "*") {
+                            auto it_clk = signals_.find("clk");
+                            if (it_clk != signals_.end())
+                                register_level_dependency("clk", pp);
+                        } else {
+                            register_level_dependency(s.signal, pp);
+                        }
+                    }
+                }
+            } else {
+                // free-running always (like always #5 clk = ~clk)
+                // is scheduled once at t=0 and then self-reschedules via #delays.
             }
         }
 
-        // -------------------------
         // gates
-        // -------------------------
         for (const auto &g : mod.gates) {
-            RtlGate gate_copy = g;
+            const RtlGate *gate_ptr = &g;
 
             rtl_processes_.emplace_back(
                 Process(
-                    [this, gate_copy](Kernel &k) {
+                    [this, gate_ptr](Kernel &k) {
                         auto get_bit = [&](const std::string &name) -> Logic4 {
                             const Value *v = k.get_signal(name);
                             if (!v || v->width() == 0) return Logic4::LX;
@@ -257,61 +266,61 @@ void Kernel::build_processes_from_rtl() {
 
                         Logic4 out = Logic4::LX;
 
-                        switch (gate_copy.kind) {
+                        switch (gate_ptr->kind) {
                         case RtlGateKind::And: {
                             Logic4 acc = Logic4::L1;
-                            for (const auto &in : gate_copy.inputs)
+                            for (const auto &in : gate_ptr->inputs)
                                 acc = logic_and(acc, get_bit(in));
                             out = acc;
                             break;
                         }
                         case RtlGateKind::Or: {
                             Logic4 acc = Logic4::L0;
-                            for (const auto &in : gate_copy.inputs)
+                            for (const auto &in : gate_ptr->inputs)
                                 acc = logic_or(acc, get_bit(in));
                             out = acc;
                             break;
                         }
                         case RtlGateKind::Not:
-                            out = logic_not(get_bit(gate_copy.inputs[0]));
+                            out = logic_not(get_bit(gate_ptr->inputs[0]));
                             break;
 
                         case RtlGateKind::Nand: {
                             Logic4 acc = Logic4::L1;
-                            for (const auto &in : gate_copy.inputs)
+                            for (const auto &in : gate_ptr->inputs)
                                 acc = logic_and(acc, get_bit(in));
                             out = logic_not(acc);
                             break;
                         }
                         case RtlGateKind::Nor: {
                             Logic4 acc = Logic4::L0;
-                            for (const auto &in : gate_copy.inputs)
+                            for (const auto &in : gate_ptr->inputs)
                                 acc = logic_or(acc, get_bit(in));
                             out = logic_not(acc);
                             break;
                         }
                         case RtlGateKind::Xor: {
                             Logic4 acc = Logic4::L0;
-                            for (const auto &in : gate_copy.inputs)
+                            for (const auto &in : gate_ptr->inputs)
                                 acc = logic_xor(acc, get_bit(in));
                             out = acc;
                             break;
                         }
                         case RtlGateKind::Xnor: {
                             Logic4 acc = Logic4::L0;
-                            for (const auto &in : gate_copy.inputs)
+                            for (const auto &in : gate_ptr->inputs)
                                 acc = logic_xor(acc, get_bit(in));
                             out = logic_not(acc);
                             break;
                         }
                         case RtlGateKind::Buf:
-                            out = get_bit(gate_copy.inputs[0]);
+                            out = get_bit(gate_ptr->inputs[0]);
                             break;
                         }
 
                         Value v(1);
                         v.set(0, out);
-                        k.drive_signal(gate_copy.out, v, /*nba=*/false);
+                        k.drive_signal(gate_ptr->out, v, /*nba=*/false);
                     },
                     SchedRegion::Active
                 )
@@ -324,9 +333,9 @@ void Kernel::build_processes_from_rtl() {
     }
 }
 
-// -------------------------
+// ============================================================================
 // Expression evaluation helpers
-// -------------------------
+// ============================================================================
 
 Value Kernel::get_signal_value(const std::string &name, std::size_t width) {
     auto it = signals_.find(name);
@@ -376,7 +385,12 @@ Value Kernel::eval_expr(const RtlExpr &e) {
     switch (e.kind) {
 
     case RtlExprKind::Ref: {
-        return get_signal_value(e.ref_name, 1);
+        auto it = signals_.find(e.ref_name);
+        std::size_t width = 1;
+        if (it != signals_.end()) {
+            width = it->second.width();
+        }
+        return get_signal_value(e.ref_name, width);
     }
 
     case RtlExprKind::Const: {
@@ -586,9 +600,9 @@ Value Kernel::eval_expr(const RtlExpr &e) {
     return Value(1, Logic4::LX);
 }
 
-// -------------------------
+// ============================================================================
 // Driving signals
-// -------------------------
+// ============================================================================
 
 void Kernel::drive_signal(const std::string &name, const Value &v, bool nba) {
     if (nba) {
@@ -602,10 +616,30 @@ void Kernel::drive_signal(const std::string &name, const Value &v, bool nba) {
         return;
     }
 
-    Logic4 old_bit = Logic4::LX;
     auto it_old = signals_.find(name);
-    if (it_old != signals_.end() && it_old->second.width() > 0) {
-        old_bit = it_old->second.get(0);
+    Value old_val(0);
+    bool had_old = false;
+    Logic4 old_bit = Logic4::LX;
+
+    if (it_old != signals_.end()) {
+        old_val = it_old->second;
+        had_old = true;
+        if (old_val.width() > 0) {
+            old_bit = old_val.get(0);
+        }
+    }
+
+    bool same = had_old && (old_val.width() == v.width());
+    if (same) {
+        for (std::size_t i = 0; i < v.width(); ++i) {
+            if (old_val.get(i) != v.get(i)) {
+                same = false;
+                break;
+            }
+        }
+    }
+    if (same) {
+        return;
     }
 
     signals_[name] = v;
@@ -647,9 +681,9 @@ void Kernel::drive_signal(const std::string &name, const Value &v, bool nba) {
     }
 }
 
-// -------------------------
+// ============================================================================
 // Dependency registration
-// -------------------------
+// ============================================================================
 
 void Kernel::register_level_dependency(const std::string &sig, Process *p) {
     if (sig.empty() || !p) return;
@@ -689,91 +723,80 @@ void Kernel::register_expr_dependencies(const RtlExpr &e, Process *p) {
     }
 }
 
-// -------------------------
+// ============================================================================
 // Procedural execution
-// -------------------------
+// ============================================================================
 
 void Kernel::exec_stmt(Thread &th) {
     const RtlStmt* s = th.stmt;
 
-    while (s) {
+    while (true) {
+        while (s) {
+            switch (s->kind) {
 
-        switch (s->kind) {
-
-        case RtlStmtKind::BlockingAssign: {
-            if (s->rhs) {
-                Value v = eval_expr(*s->rhs);
-                drive_signal(s->lhs_name, v, /*nba=*/false);
-            }
-            s = s->next;
-            break;
-        }
-
-        case RtlStmtKind::NonBlockingAssign: {
-            if (s->rhs) {
-                Value v = eval_expr(*s->rhs);
-                drive_signal(s->lhs_name, v, /*nba=*/true);
-            }
-            s = s->next;
-            break;
-        }
-
-        case RtlStmtKind::Delay: {
-            uint64_t d = 0;
-            if (s->delay_expr) {
-                Value dv = eval_expr(*s->delay_expr);
-                d = value_to_uint(dv);
+            case RtlStmtKind::BlockingAssign: {
+                if (s->rhs) {
+                    Value v = eval_expr(*s->rhs);
+                    drive_signal(s->lhs_name, v, /*nba=*/false);
+                }
+                s = s->next;
+                break;
             }
 
-            // Build continuation thread, preserving owner + entry
-            Thread cont;
-            cont.stmt  = s->delay_stmt;
-            cont.next  = s->next;
-            cont.owner = th.owner;
-            cont.entry = th.entry;
+            case RtlStmtKind::NonBlockingAssign: {
+                if (s->rhs) {
+                    Value v = eval_expr(*s->rhs);
+                    drive_signal(s->lhs_name, v, /*nba=*/true);
+                }
+                s = s->next;
+                break;
+            }
 
-            schedule(
-                Process(
-                    [this, cont](Kernel &k) mutable {
-                        Thread t = cont;
-                        k.exec_stmt(t);
-                    },
+            case RtlStmtKind::Delay: {
+                uint64_t d = 0;
+                if (s->delay_expr) {
+                    Value dv = eval_expr(*s->delay_expr);
+                    d = value_to_uint(dv);
+                }
+
+                Thread cont;
+                cont.stmt  = s->next;
+                cont.next  = nullptr;
+                cont.owner = th.owner;
+                cont.entry = th.entry;
+
+                schedule(
+                    Process(
+                        [this, cont](Kernel &k) mutable {
+                            Thread t = cont;
+                            k.exec_stmt(t);
+                        },
+                        SchedRegion::Active
+                    ),
+                    d,
                     SchedRegion::Active
-                ),
-                d,
-                SchedRegion::Active
-            );
-            return;
+                );
+                return;
+            }
+
+            case RtlStmtKind::Finish:
+                request_stop();
+                return;
+            }
         }
 
-        case RtlStmtKind::Finish:
-            std::exit(0);
+        // End of stmt list.
+        // Only free‑running always blocks (no sensitivity) loop forever.
+        if (th.owner &&
+            th.owner->kind == RtlProcessKind::Always &&
+            th.owner->sensitivity.empty() &&
+            !stop_requested_) {
+            s = th.entry;
+            continue;
         }
+
+        break;
     }
-
-    // If we reached the end of the statement chain and this is an
-    // 'always' process, reschedule it from its entry point.
-    if (th.owner && th.owner->kind == RtlProcessKind::Always && th.entry) {
-        Thread restart;
-        restart.stmt  = th.entry;
-        restart.next  = nullptr;
-        restart.owner = th.owner;
-        restart.entry = th.entry;
-
-        schedule(
-            Process(
-                [this, restart](Kernel &k) mutable {
-                    Thread t = restart;
-                    k.exec_stmt(t);
-                },
-                SchedRegion::Active
-            ),
-            0,
-            SchedRegion::Active
-        );
-    }
-
 }
-
 
 } // namespace sv

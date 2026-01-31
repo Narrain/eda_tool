@@ -113,14 +113,9 @@ int main(int argc, char **argv) {
     RtlDesign rd = irb.build();   // this one is for simulation
 
     for (const auto &m : rd.modules) {
-        std::cout << "MODULE " << m.name << "\n";
-        for (const auto &p : m.processes) {
-            std::cout << "  PROCESS kind=" << int(p.kind)
-                      << " assigns=" << p.assigns.size()
-                      << " first_stmt=" << (p.first_stmt ? "YES" : "NO")
-                      << "\n";
-        }
+        dump_rtl_module(m);
     }
+
 
     // -----------------------------
     // Synthesis on a separate copy
@@ -145,36 +140,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Let kernel initialize signals and VCD header
+    // Let kernel initialize signals, build its own processes, and emit VCD header
     k.load_design(&rd);
 
-    // Explicitly schedule all RTL processes at time 0,
-    // driving their procedural bodies directly.
-    for (const auto &mod : rd.modules) {
-        for (const auto &rp : mod.processes) {
-            const RtlProcess *proc_ptr = &rp;
-
-            Process proc(
-                [proc_ptr](Kernel &kk) {
-                    if (proc_ptr->first_stmt) {
-                        Thread th{
-                            proc_ptr->first_stmt,
-                            nullptr,
-                            proc_ptr,
-                            proc_ptr->first_stmt
-                        };
-                        kk.exec_stmt(th);
-                    }
-                    // No fallback: we only care about procedural bodies here.
-                },
-                SchedRegion::Active
-            );
-
-            k.schedule(std::move(proc), 0, SchedRegion::Active);
-        }
-    }
-
-    // Run simulation
+    // Run simulation (kernel is responsible for scheduling based on sensitivity)
     k.run(max_time);
 
     // -----------------------------

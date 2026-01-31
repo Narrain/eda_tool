@@ -32,6 +32,7 @@ struct ElabModule {
     std::vector<ElabParam> params;
     std::vector<ElabNet> nets;
     std::vector<ElabInstance> instances;
+    std::vector<const ModuleItem*> flat_items;
 };
 
 struct ElabInstance {

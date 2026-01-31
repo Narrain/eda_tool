@@ -29,11 +29,10 @@ struct ScheduledProcess {
 
 struct Thread {
     const RtlStmt* stmt;
-    const RtlStmt* next;          // still unused, but keep for now
-    const RtlProcess* owner;      // NEW: which process this thread belongs to
-    const RtlStmt* entry;         // NEW: entry stmt of that process
+    const RtlStmt* next;
+    const RtlProcess* owner;
+    const RtlStmt* entry;
 };
-
 
 class Kernel {
 public:
@@ -63,12 +62,17 @@ public:
 
     void exec_stmt(Thread &th);
 
+    bool stop_requested() const { return stop_requested_; }
+    void request_stop() { stop_requested_ = true; }
+
 private:
     const RtlDesign *design_ = nullptr;
     VcdWriter *vcd_ = nullptr;
 
     uint64_t cur_time_ = 0;
     uint64_t cur_delta_ = 0;
+
+    bool stop_requested_ = false;
 
     std::priority_queue<ScheduledProcess> pq_;
     std::vector<Process> nba_queue_;

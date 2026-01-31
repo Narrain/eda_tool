@@ -6,7 +6,6 @@ module top;
 
   assign w = r;
 
-  // clock generator
   always begin
     #5 clk = 1;
     #5 clk = 0;

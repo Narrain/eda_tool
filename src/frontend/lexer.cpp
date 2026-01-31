@@ -228,24 +228,28 @@ Token Lexer::lexSymbol() {
     // single-char symbols
     std::string s(1, c);
     switch (c) {
-    case '+': case '-': case '*': case '/': case '%':
-    case '&': case '|': case '^': case '~':
-    case '!':
-    case '<': case '>':
-    case '=':
-    case '?': case ':':
-    case '@': case '#':
-    case '(': case ')':
-    case '[': case ']':
-    case '{': case '}':
-    case '.':
-    case ',': case ';':
-        return makeToken(TokenKind::Symbol, s, startLine, startCol);
-    case '"':
-        // normally handled by lexString() in lex()
-        break;
-    default:
-        break;
+        case '+': case '-': case '*': case '/': case '%':
+        case '&': case '|': case '^': case '~':
+        case '!':
+        case '<': case '>':
+        case '=':
+        case '?': case ':':
+        case '@':
+            return makeToken(TokenKind::Symbol, s, startLine, startCol);
+
+        case '#':
+            // FIX: force text to "#"
+            return makeToken(TokenKind::Symbol, "#", startLine, startCol);
+
+        case '(': case ')':
+        case '[': case ']':
+        case '{': case '}':
+        case '.':
+        case ',': case ';':
+            return makeToken(TokenKind::Symbol, s, startLine, startCol);
+
+        case '"':
+            break;
     }
 
     throw std::runtime_error("Unknown symbol '" + s + "' at " +

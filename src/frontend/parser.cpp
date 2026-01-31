@@ -1,6 +1,7 @@
+// src/frontend/parser.cpp
 #include <stdexcept>
-#include "parser.hpp"
 #include <iostream>
+#include "parser.hpp"
 
 namespace sv {
 
@@ -50,8 +51,6 @@ bool Parser::isSymbol(const std::string &s) const {
 // -----------------------------------------------------
 
 int Parser::getBinOpPrecedence(const std::string &op) const {
-    // lower number => lower precedence
-    // *** IMPORTANT: '=' is NOT an expression operator here ***
     if (op == "||") return 1;
     if (op == "&&") return 2;
     if (op == "==" || op == "!=" || op == "===" || op == "!==") return 3;
@@ -150,9 +149,7 @@ std::unique_ptr<ModuleDecl> Parser::parseModule() {
     mod->name = nameTok.text;
     mod->loc = modTok.loc;
 
-    // -----------------------------------------
-    // MODULE PARAMETER LIST: #(parameter ...)
-    // -----------------------------------------
+    // parameter list #(parameter ...)
     if (isSymbol("#")) {
         get(); // '#'
         expect(TokenKind::Symbol, "(");
@@ -178,7 +175,6 @@ std::unique_ptr<ModuleDecl> Parser::parseModule() {
 
         expect(TokenKind::Symbol, ")");
     }
-    // -----------------------------------------
 
     // port list
     if (isSymbol("(")) {
@@ -237,14 +233,17 @@ std::unique_ptr<PortDecl> Parser::parsePortDecl() {
 }
 
 std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
-std::cerr << "MI: '" << peek().text 
-          << "' kind=" << (int)peek().kind 
-          << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
+    std::cerr << "MI: '" << peek().text
+              << "' kind=" << (int)peek().kind
+              << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
 
+    // bare generate-for at module level
     if (peek().text == "for") {
         auto gc = std::make_unique<GenerateConstruct>();
+        gc->loc = peek().loc;
         gc->item = parseGenerateFor();
         auto item = std::make_unique<ModuleItem>(ModuleItemKind::Generate);
+        item->loc = gc->loc;
         item->gen = std::move(gc);
         return item;
     }
@@ -254,6 +253,7 @@ std::cerr << "MI: '" << peek().text
         match(TokenKind::Keyword, "localparam")) {
         auto p = parseParamDecl();
         auto item = std::make_unique<ModuleItem>(ModuleItemKind::ParamDecl);
+        item->loc = p->loc;
         item->param_decl = std::move(p);
         return item;
     }
@@ -262,6 +262,7 @@ std::cerr << "MI: '" << peek().text
     if (match(TokenKind::Keyword, "assign")) {
         auto ca = parseContinuousAssign();
         auto item = std::make_unique<ModuleItem>(ModuleItemKind::ContinuousAssign);
+        item->loc = ca->loc;
         item->cont_assign = std::move(ca);
         return item;
     }
@@ -273,6 +274,7 @@ std::cerr << "MI: '" << peek().text
         match(TokenKind::Keyword, "always_latch")) {
         auto a = parseAlways();
         auto item = std::make_unique<ModuleItem>(ModuleItemKind::Always);
+        item->loc = a->loc;
         item->always = std::move(a);
         return item;
     }
@@ -281,6 +283,7 @@ std::cerr << "MI: '" << peek().text
     if (match(TokenKind::Keyword, "initial")) {
         auto init = parseInitial();
         auto item = std::make_unique<ModuleItem>(ModuleItemKind::Initial);
+        item->loc = init->loc;
         item->initial = std::move(init);
         return item;
     }
@@ -290,9 +293,9 @@ std::cerr << "MI: '" << peek().text
         return parseGenerateConstruct();
     }
 
-    // genvar declaration  (handle even if lexer classifies it as Identifier)
+    // genvar declaration
     if (peek().text == "genvar") {
-        const Token &kw = get(); // consume 'genvar'
+        const Token &kw = get(); // 'genvar'
         auto nameTok = expect(TokenKind::Identifier);
         expect(TokenKind::Symbol, ";");
 
@@ -301,6 +304,7 @@ std::cerr << "MI: '" << peek().text
         gv->loc = kw.loc;
 
         auto item = std::make_unique<ModuleItem>(ModuleItemKind::GenVarDecl);
+        item->loc = kw.loc;
         item->genvar_decl = std::move(gv);
         return item;
     }
@@ -316,22 +320,23 @@ std::cerr << "MI: '" << peek().text
         if (dt.kind == DataTypeKind::Wire || dt.kind == DataTypeKind::Logic) {
             auto net = parseNetDecl(dt, nameTok);
             auto item = std::make_unique<ModuleItem>(ModuleItemKind::NetDecl);
+            item->loc = net->loc;
             item->net_decl = std::move(net);
             return item;
         } else {
             auto var = parseVarDecl(dt, nameTok);
             auto item = std::make_unique<ModuleItem>(ModuleItemKind::VarDecl);
+            item->loc = var->loc;
             item->var_decl = std::move(var);
             return item;
         }
     }
 
-    // instance: module_name [#(...)] inst_name (...)
+    // instance
     if (match(TokenKind::Identifier)) {
         size_t saveIdx = idx_;
         auto modNameTok = get();
 
-        // INSTANCE PARAMETER OVERRIDES
         std::vector<ParamOverride> overrides;
 
         if (isSymbol("#")) {
@@ -401,6 +406,7 @@ std::cerr << "MI: '" << peek().text
                 expect(TokenKind::Symbol, ";");
 
                 auto item = std::make_unique<ModuleItem>(ModuleItemKind::Instance);
+                item->loc = inst->loc;
                 item->instance = std::move(inst);
                 return item;
             }
@@ -491,13 +497,27 @@ std::unique_ptr<AlwaysConstruct> Parser::parseAlways() {
     else if (kw.text == "always_latch") a->kind = AlwaysKind::AlwaysLatch;
     else a->kind = AlwaysKind::Always;
 
+    // event control: always @(...)
     if (isSymbol("@")) {
         get();
         expect(TokenKind::Symbol, "(");
         parseSensitivityList(*a);
         expect(TokenKind::Symbol, ")");
+        a->body = parseStatementOrBlock();
+        return a;
     }
 
+    // delay control: always #5 ...
+    if (peek().text == "#") {
+        auto delayStmt = parseStatement();   // hits delay rule above
+        auto blk = std::make_unique<Statement>(StmtKind::Block);
+        blk->loc = delayStmt->loc;
+        blk->block_stmts.push_back(std::move(delayStmt));
+        a->body = std::move(blk);
+        return a;
+    }
+
+    // normal body
     a->body = parseStatementOrBlock();
     return a;
 }
@@ -511,7 +531,6 @@ std::unique_ptr<InitialConstruct> Parser::parseInitial() {
 }
 
 void Parser::parseSensitivityList(AlwaysConstruct &a) {
-    // @* or @(*)
     if (isSymbol("*")) {
         get();
         SensitivityItem item;
@@ -546,17 +565,12 @@ void Parser::parseSensitivityList(AlwaysConstruct &a) {
 // -----------------------------------------------------
 // statements
 // -----------------------------------------------------
-std::unique_ptr<Statement> Parser::parseStatement() {
-    std::cerr << "DEBUG TOKEN: '" << peek().text 
-              << "' kind=" << (int)peek().kind 
-              << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
 
-    // delay control: #expr statement  (MUST be first)
-    if (isSymbol("#")) {
+std::unique_ptr<Statement> Parser::parseStatement() {
+    // MUST BE FIRST — delay control: #expr statement
+    if (peek().text == "#") {
         auto hashTok = get(); // '#'
         auto delayExpr = parseExpression();
-
-        // after delay, parse the actual statement
         auto stmt = parseStatement();
 
         auto s = std::make_unique<Statement>(StmtKind::Delay);
@@ -565,6 +579,10 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         s->delay_stmt = std::move(stmt);
         return s;
     }
+
+    std::cerr << "DEBUG TOKEN: '" << peek().text
+              << "' kind=" << (int)peek().kind
+              << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
 
     // if
     if (match(TokenKind::Keyword, "if")) {
@@ -613,7 +631,6 @@ std::unique_ptr<Statement> Parser::parseStatement() {
 
     const Token &t = peek();
 
-    // expression statement: <expr> ;
     if (isSymbol(";")) {
         auto semi = get();
         auto s = std::make_unique<Statement>(StmtKind::ExprStmt);
@@ -630,34 +647,33 @@ std::unique_ptr<Statement> Parser::parseStatement() {
 }
 
 std::unique_ptr<Statement> Parser::parseStatementOrBlock() {
-    // begin ... end block
     if (match(TokenKind::Keyword, "begin")) {
         auto beginTok = get();
 
         auto blk = std::make_unique<Statement>(StmtKind::Block);
         blk->loc = beginTok.loc;
 
-        // parse statements until we hit 'end'
         while (true) {
-            // stop at 'end'
             if (match(TokenKind::Keyword, "end"))
                 break;
 
+            if (isSymbol(";")) { 
+                get(); 
+                continue; 
+            }
             blk->block_stmts.push_back(parseStatement());
         }
 
         expect(TokenKind::Keyword, "end");
 
-        // optional: end : label
         if (isSymbol(":")) {
             get(); // ':'
-            expect(TokenKind::Identifier); // label name
+            expect(TokenKind::Identifier); // label
         }
 
         return blk;
     }
 
-    // single statement
     return parseStatement();
 }
 
@@ -742,16 +758,13 @@ std::unique_ptr<Expression> Parser::parseExpression() {
 std::unique_ptr<Expression> Parser::parsePrimary() {
     const Token &t = peek();
 
-    // IDENTIFIER (with bit-select support)
     if (t.kind == TokenKind::Identifier) {
         auto tok = get();
 
-        // base identifier
         auto base = std::make_unique<Expression>(ExprKind::Identifier);
         base->loc = tok.loc;
         base->ident = tok.text;
 
-        // bit-select / part-select: id[expr]
         while (isSymbol("[")) {
             get(); // '['
             auto index = parseExpression();
@@ -765,15 +778,9 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             base = std::move(sel);
         }
 
-        // *** IMPORTANT FIX ***
-        // DO NOT PARSE "id = expr" HERE.
-        // Assignments are NOT expressions in SystemVerilog.
-        // They are handled ONLY in parseStatement() and parseContinuousAssign().
-
         return base;
     }
 
-    // NUMBER
     if (t.kind == TokenKind::Number) {
         auto tok = get();
         auto e = std::make_unique<Expression>(ExprKind::Number);
@@ -782,7 +789,6 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return e;
     }
 
-    // STRING
     if (t.kind == TokenKind::String) {
         auto tok = get();
         auto e = std::make_unique<Expression>(ExprKind::String);
@@ -791,7 +797,6 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return e;
     }
 
-    // ( expression )
     if (isSymbol("(")) {
         get();
         auto e = parseExpression();
@@ -799,7 +804,6 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return e;
     }
 
-    // { ... } concatenation / replication
     if (isSymbol("{")) {
         return parseConcatenationOrReplication();
     }
@@ -813,7 +817,6 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 std::unique_ptr<Expression> Parser::parseConcatenationOrReplication() {
     auto lbrace = expect(TokenKind::Symbol, "{");
 
-    // replication: { N { a, b } }
     if (match(TokenKind::Number)) {
         size_t saveIdx = idx_;
         auto countTok = get();
@@ -841,7 +844,6 @@ std::unique_ptr<Expression> Parser::parseConcatenationOrReplication() {
         idx_ = saveIdx;
     }
 
-    // concatenation
     auto cat = std::make_unique<Expression>(ExprKind::Concatenation);
     cat->loc = lbrace.loc;
     while (!isSymbol("}")) {
@@ -916,21 +918,27 @@ std::unique_ptr<Expression> Parser::parseTernaryRHS(std::unique_ptr<Expression> 
     return e;
 }
 
+// -----------------------------------------------------
+// generate constructs
+// -----------------------------------------------------
+
 std::unique_ptr<ModuleItem> Parser::parseGenerateConstruct() {
     auto genTok = expect(TokenKind::Keyword, "generate");
 
     auto gc = std::make_unique<GenerateConstruct>();
+    gc->loc = genTok.loc;
     gc->item = parseGenerateItem();
 
     expect(TokenKind::Keyword, "endgenerate");
 
     auto item = std::make_unique<ModuleItem>(ModuleItemKind::Generate);
+    item->loc = genTok.loc;
     item->gen = std::move(gc);
     return item;
 }
 
 std::unique_ptr<GenerateItem> Parser::parseGenerateItem() {
-    // robust: handle 'for' whether lexer marks it as Keyword or Identifier
+    // For now we only support: for (...) begin ... end
     if (peek().text == "for") {
         return parseGenerateFor();
     }
@@ -943,78 +951,88 @@ std::unique_ptr<GenerateItem> Parser::parseGenerateItem() {
 }
 
 std::unique_ptr<GenerateItem> Parser::parseGenerateFor() {
-    // accept 'for' whether lexer marks it as Keyword or Identifier
     if (peek().text != "for") {
         const Token &t = peek();
         throw std::runtime_error(
             "Expected 'for' in generate-for, got '" + t.text + "'");
     }
-    get(); // consume 'for'
+    auto forTok = get(); // 'for' (identifier token)
 
     expect(TokenKind::Symbol, "(");
 
-    // --- genvar assignment parser ---
-    auto parseGenvarAssign = [&]() {
-        auto lhsTok = expect(TokenKind::Identifier);
-        expect(TokenKind::Symbol, "=");
-        auto rhs = parseExpression();
+    // ----------------------------------------
+    // init: genvar_name = <expr>;
+    // ----------------------------------------
+    auto genvarTok = expect(TokenKind::Identifier);
+    std::string genvar_name = genvarTok.text;
 
-        auto assign = std::make_unique<Expression>(ExprKind::Binary);
-        assign->loc = lhsTok.loc;
-        assign->binary_op = BinaryOp::Assign;
-
-        auto lhs = std::make_unique<Expression>(ExprKind::Identifier);
-        lhs->loc = lhsTok.loc;
-        lhs->ident = lhsTok.text;
-
-        assign->lhs = std::move(lhs);
-        assign->rhs = std::move(rhs);
-        return assign;
-    };
-
-    // init
-    auto init = parseGenvarAssign();
+    expect(TokenKind::Symbol, "=");
+    auto init_expr = parseExpression();
     expect(TokenKind::Symbol, ";");
 
-    // cond (normal expression)
-    auto cond = parseExpression();
+    // ----------------------------------------
+    // condition: <expr>;
+    // (we'll interpret it later as i < limit, etc.)
+    // ----------------------------------------
+    auto cond_expr = parseExpression();
     expect(TokenKind::Symbol, ";");
 
-    // step
-    auto step = parseGenvarAssign();
+    // ----------------------------------------
+    // step: genvar_name = <expr>
+    // ----------------------------------------
+    auto step_lhs = expect(TokenKind::Identifier);
+    if (step_lhs.text != genvar_name) {
+        throw std::runtime_error(
+            "Generate-for step must assign to same genvar '" +
+            genvar_name + "'");
+    }
+    expect(TokenKind::Symbol, "=");
+    auto step_expr = parseExpression();
+
     expect(TokenKind::Symbol, ")");
 
-    // begin : label
-    expect(TokenKind::Keyword, "begin");
+    // ----------------------------------------
+    // body: begin [: label] <module items> end [: label]
+    // ----------------------------------------
+    auto beginTok = expect(TokenKind::Keyword, "begin");
 
-    std::string label;
+    // Optional label after 'begin'
     if (isSymbol(":")) {
-        get();
-        label = expect(TokenKind::Identifier).text;
+        get(); // ':'
+        expect(TokenKind::Identifier); // label name
     }
 
-    auto block = std::make_unique<GenerateBlock>();
-    block->name = label;
+    // Build a Block generate item to hold module items
+    auto body = std::make_unique<GenerateItem>(GenItemKind::Block);
+    body->loc = beginTok.loc;
+    body->block = std::make_unique<GenerateBlock>();
+    body->block->loc = beginTok.loc;
 
-    while (!(peek().text == "end" || peek().text == "endgenerate")) {
-        block->items.push_back(parseModuleItem());
+    while (!match(TokenKind::Keyword, "end")) {
+        // Reuse normal module-item parser inside the generate block
+        body->block->items.push_back(parseModuleItem());
     }
 
     expect(TokenKind::Keyword, "end");
 
+    // Optional label after 'end' (end : gen_blk)
+    if (isSymbol(":")) {
+        get(); // ':'
+        expect(TokenKind::Identifier); // label name
+    }
+
+    // ----------------------------------------
+    // Build the For generate item
+    // ----------------------------------------
     auto gi = std::make_unique<GenerateItem>(GenItemKind::For);
-    gi->for_init = std::move(init);
-    gi->for_cond = std::move(cond);
-    gi->for_step = std::move(step);
-
-    gi->for_body = std::make_unique<GenerateItem>(GenItemKind::Block);
-    gi->for_body->block = std::move(block);
-
-    // extract genvar name
-    gi->genvar_name = gi->for_init->lhs->ident;
+    gi->loc = forTok.loc;
+    gi->genvar_name = genvar_name;
+    gi->for_init = std::move(init_expr);
+    gi->for_cond = std::move(cond_expr);
+    gi->for_step = std::move(step_expr);
+    gi->for_body = std::move(body);
 
     return gi;
 }
-
 
 } // namespace sv
