@@ -233,9 +233,6 @@ std::unique_ptr<PortDecl> Parser::parsePortDecl() {
 }
 
 std::unique_ptr<ModuleItem> Parser::parseModuleItem() {
-    std::cerr << "MI: '" << peek().text
-              << "' kind=" << (int)peek().kind
-              << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
 
     // bare generate-for at module level
     if (peek().text == "for") {
@@ -580,10 +577,6 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return s;
     }
 
-    std::cerr << "DEBUG TOKEN: '" << peek().text
-              << "' kind=" << (int)peek().kind
-              << " at " << peek().loc.line << ":" << peek().loc.column << "\n";
-
     // if
     if (match(TokenKind::Keyword, "if")) {
         return parseIfStatement();
@@ -602,43 +595,76 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return s;
     }
 
-    // assignment-like statement
-    auto lhs = parseExpression();
+    // -------------------------------------------------
+    // Try: assignment-like statement
+    //   <primary> <= expr;
+    //   <primary> =  expr;
+    // If that fails, fall back to full expression stmt.
+    // -------------------------------------------------
+    size_t saveIdx = idx_;
+    SourceLocation lhsLoc = peek().loc;
 
+    // LHS must be something primary (id, bitselect, concat, etc.)
+    std::unique_ptr<Expression> lhs;
+    try {
+        lhs = parsePrimary();
+    } catch (...) {
+        // Not even a primary → treat as generic expression stmt
+        idx_ = saveIdx;
+        auto expr = parseExpression();
+        if (isSymbol(";")) {
+            auto semi = get();
+            auto s = std::make_unique<Statement>(StmtKind::ExprStmt);
+            s->loc = semi.loc;
+            s->expr = std::move(expr);
+            return s;
+        }
+        const Token &t = peek();
+        throw std::runtime_error(
+            "Unsupported statement near token '" +
+            t.text + "' at " + t.loc.file + ":" +
+            std::to_string(t.loc.line) + ":" +
+            std::to_string(t.loc.column));
+    }
+
+    // Nonblocking: <=
     if (isSymbol("<=")) {
-        auto tok = get();
+        auto tok = get(); // consume <=
         auto rhs = parseExpression();
         expect(TokenKind::Symbol, ";");
 
         auto s = std::make_unique<Statement>(StmtKind::NonBlockingAssign);
-        s->loc = tok.loc;
+        s->loc = lhsLoc;
         s->lhs = std::move(lhs);
         s->rhs = std::move(rhs);
         return s;
     }
 
+    // Blocking: =
     if (isSymbol("=")) {
-        auto tok = get();
+        auto tok = get(); // consume =
         auto rhs = parseExpression();
         expect(TokenKind::Symbol, ";");
 
         auto s = std::make_unique<Statement>(StmtKind::BlockingAssign);
-        s->loc = tok.loc;
+        s->loc = lhsLoc;
         s->lhs = std::move(lhs);
         s->rhs = std::move(rhs);
         return s;
     }
 
-    const Token &t = peek();
-
+    // Not an assignment after all → treat as expression stmt
+    idx_ = saveIdx;
+    auto expr = parseExpression();
     if (isSymbol(";")) {
         auto semi = get();
         auto s = std::make_unique<Statement>(StmtKind::ExprStmt);
         s->loc = semi.loc;
-        s->expr = std::move(lhs);
+        s->expr = std::move(expr);
         return s;
     }
 
+    const Token &t = peek();
     throw std::runtime_error(
         "Unsupported statement near token '" +
         t.text + "' at " + t.loc.file + ":" +

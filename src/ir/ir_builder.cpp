@@ -1,4 +1,3 @@
-// src/ir/ir_builder.cpp
 #include "ir_builder.hpp"
 #include "../frontend/const_eval.hpp"
 
@@ -7,6 +6,10 @@
 #include <unordered_set>
 
 namespace sv {
+
+// ============================================================================
+// Helpers to map AST ops → RTL ops
+// ============================================================================
 
 static RtlBinOp map_bin_op(BinaryOp op) {
     switch (op) {
@@ -56,6 +59,48 @@ static bool is_finish_call(const Expression *e) {
     return e && e->kind == ExprKind::Identifier && e->ident == "$finish";
 }
 
+// Small helpers to build RTL expressions directly
+static std::unique_ptr<RtlExpr> make_const(const std::string &lit) {
+    auto r = std::make_unique<RtlExpr>(RtlExprKind::Const);
+    r->const_literal = lit;
+    return r;
+}
+
+static std::unique_ptr<RtlExpr> make_ref(const std::string &name) {
+    auto r = std::make_unique<RtlExpr>(RtlExprKind::Ref);
+    r->ref_name = name;
+    return r;
+}
+
+static std::unique_ptr<RtlExpr> make_un(RtlUnOp op, std::unique_ptr<RtlExpr> operand) {
+    auto r = std::make_unique<RtlExpr>(RtlExprKind::Unary);
+    r->un_op = op;
+    r->un_operand = std::move(operand);
+    return r;
+}
+
+static std::unique_ptr<RtlExpr> make_bin(RtlBinOp op,
+                                         std::unique_ptr<RtlExpr> lhs,
+                                         std::unique_ptr<RtlExpr> rhs) {
+    auto r = std::make_unique<RtlExpr>(RtlExprKind::Binary);
+    r->bin_op = op;
+    r->lhs = std::move(lhs);
+    r->rhs = std::move(rhs);
+    return r;
+}
+
+static std::unique_ptr<RtlExpr> make_bitselect(std::unique_ptr<RtlExpr> base,
+                                               std::unique_ptr<RtlExpr> index) {
+    auto r = std::make_unique<RtlExpr>(RtlExprKind::BitSelect);
+    r->base  = std::move(base);
+    r->index = std::move(index);
+    return r;
+}
+
+// ============================================================================
+// IRBuilder entry
+// ============================================================================
+
 RtlDesign IRBuilder::build() {
     RtlDesign out;
     for (const auto &m : design_.modules) {
@@ -70,12 +115,12 @@ RtlModule IRBuilder::buildModule(const ModuleDecl &mod) {
 
     const auto &em = elab_.modules.at(mod.name);
 
-    // Params and nets still come from original mod
+    // Params, nets, continuous assigns from original module
     collectParams(mod, out);
     collectNets(mod, out);
     collectContinuousAssigns(mod, out);
 
-    // PROCESSES MUST COME FROM ELABORATED MODULE
+    // Processes from elaborated module (includes generate-for unrolled items)
     for (const ModuleItem *item : em.flat_items) {
         if (item->kind == ModuleItemKind::Always && item->always)
             collectProcessFromAlways(*item->always, out);
@@ -83,11 +128,15 @@ RtlModule IRBuilder::buildModule(const ModuleDecl &mod) {
             collectProcessFromInitial(*item->initial, out);
     }
 
-    // Instances still from original mod
+    // Instances from original module
     collectInstances(mod, out);
 
     return out;
 }
+
+// ============================================================================
+// Params / nets / continuous assigns / instances
+// ============================================================================
 
 void IRBuilder::collectParams(const ModuleDecl &mod, RtlModule &out) {
     for (const auto &p : mod.params) {
@@ -127,7 +176,8 @@ void IRBuilder::collectContinuousAssigns(const ModuleDecl &mod, RtlModule &out) 
         RtlAssign a;
         a.kind     = RtlAssignKind::Continuous;
         a.lhs_name = ca.lhs->ident;
-        a.rhs      = lowerExpr(*ca.rhs);
+        if (ca.rhs)
+            a.rhs = lowerExpr(*ca.rhs);
         out.continuous_assigns.push_back(std::move(a));
     }
 }
@@ -212,6 +262,10 @@ void IRBuilder::collectInstances(const ModuleDecl &mod, RtlModule &out) {
     }
 }
 
+// ============================================================================
+// Expression lowering
+// ============================================================================
+
 std::unique_ptr<RtlExpr> IRBuilder::lowerExpr(const Expression &e) {
     switch (e.kind) {
     case ExprKind::Identifier: {
@@ -240,6 +294,15 @@ std::unique_ptr<RtlExpr> IRBuilder::lowerExpr(const Expression &e) {
             r->rhs = lowerExpr(*e.rhs);
         return r;
     }
+    case ExprKind::BitSelect: {
+        // Native BitSelect IR node: base[index]
+        if (e.lhs && e.rhs) {
+            auto base  = lowerExpr(*e.lhs);
+            auto index = lowerExpr(*e.rhs);
+            return make_bitselect(std::move(base), std::move(index));
+        }
+        return make_const("0");
+    }
     default: {
         auto r = std::make_unique<RtlExpr>(RtlExprKind::Const);
         r->const_literal = "0";
@@ -260,6 +323,10 @@ RtlAssign IRBuilder::lowerAssign(const Statement &s, RtlAssignKind kind) {
     return a;
 }
 
+// ============================================================================
+// Procedural body lowering
+// ============================================================================
+
 static void append_stmt(RtlProcess &p, RtlStmt *&head, RtlStmt *&tail, std::unique_ptr<RtlStmt> ns) {
     RtlStmt *raw = ns.get();
     p.stmts.push_back(std::move(ns));
@@ -279,9 +346,9 @@ RtlStmt* IRBuilder::build_proc_body(const Statement &body, RtlProcess &p) {
 
     std::function<void(const Statement&)> build_stmt =
         [&](const Statement &s) {
-            if (visited.find(&s) != visited.end())
-                return;
-            visited.insert(&s);
+            // if (visited.find(&s) != visited.end())
+            //     return;
+            // visited.insert(&s);
 
             switch (s.kind) {
 
@@ -293,24 +360,7 @@ RtlStmt* IRBuilder::build_proc_body(const Statement &body, RtlProcess &p) {
                 break;
             }
 
-            case StmtKind::BlockingAssign: {
-                if (s.delay_expr) {
-                    auto d = std::make_unique<RtlStmt>();
-                    d->kind = RtlStmtKind::Delay;
-                    d->delay_expr = lowerExpr(*s.delay_expr);
-                    append_stmt(p, head, tail, std::move(d));
-                }
-
-                auto ns = std::make_unique<RtlStmt>();
-                ns->kind = RtlStmtKind::BlockingAssign;
-                if (s.lhs && s.lhs->kind == ExprKind::Identifier)
-                    ns->lhs_name = s.lhs->ident;
-                if (s.rhs)
-                    ns->rhs = lowerExpr(*s.rhs);
-                append_stmt(p, head, tail, std::move(ns));
-                break;
-            }
-
+            case StmtKind::BlockingAssign:
             case StmtKind::NonBlockingAssign: {
                 if (s.delay_expr) {
                     auto d = std::make_unique<RtlStmt>();
@@ -320,11 +370,40 @@ RtlStmt* IRBuilder::build_proc_body(const Statement &body, RtlProcess &p) {
                 }
 
                 auto ns = std::make_unique<RtlStmt>();
-                ns->kind = RtlStmtKind::NonBlockingAssign;
-                if (s.lhs && s.lhs->kind == ExprKind::Identifier)
+                ns->kind = (s.kind == StmtKind::BlockingAssign)
+                           ? RtlStmtKind::BlockingAssign
+                           : RtlStmtKind::NonBlockingAssign;
+
+                // Case 1: simple identifier LHS
+                if (s.lhs && s.lhs->kind == ExprKind::Identifier) {
                     ns->lhs_name = s.lhs->ident;
-                if (s.rhs)
-                    ns->rhs = lowerExpr(*s.rhs);
+                    if (s.rhs)
+                        ns->rhs = lowerExpr(*s.rhs);
+                    append_stmt(p, head, tail, std::move(ns));
+                    break;
+                }
+
+                // Case 2: bit-select LHS: r[i] <= rhs;
+                if (s.lhs && s.lhs->kind == ExprKind::BitSelect &&
+                    s.lhs->lhs && s.lhs->lhs->kind == ExprKind::Identifier &&
+                    s.lhs->rhs) {
+
+                    const auto &bs       = *s.lhs;
+                    const auto &base_id  = *bs.lhs;
+                    const auto &idx_expr = *bs.rhs;
+
+                    auto base  = make_ref(base_id.ident);
+                    auto index = lowerExpr(idx_expr);
+                    ns->lhs_expr = make_bitselect(std::move(base), std::move(index));
+
+                    if (s.rhs)
+                        ns->rhs = lowerExpr(*s.rhs);
+
+                    append_stmt(p, head, tail, std::move(ns));
+                    break;
+                }
+
+                // Fallback: unsupported LHS form, ignore (no-op)
                 append_stmt(p, head, tail, std::move(ns));
                 break;
             }
@@ -374,6 +453,10 @@ RtlStmt* IRBuilder::build_proc_body(const Statement &body, RtlProcess &p) {
     build_stmt(body);
     return head;
 }
+
+// ============================================================================
+// Debug dump
+// ============================================================================
 
 void dump_rtl_module(const RtlModule &m) {
     std::cout << "RTL Module: " << m.name << "\n";

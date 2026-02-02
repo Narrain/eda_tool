@@ -94,7 +94,11 @@ private:
     Value eval_expr(const RtlExpr &e);
 
     Value get_signal_value(const std::string &name, std::size_t width);
+
+    // Whole‑net drive
     void drive_signal(const std::string &name, const Value &v, bool nba);
+    // Bit‑select / expression LHS drive
+    void drive_signal(const RtlExpr &lhs_expr, const Value &rhs, bool nba);
 
     void register_level_dependency(const std::string &sig, Process *p);
     void register_posedge_dependency(const std::string &sig, Process *p);

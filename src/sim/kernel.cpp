@@ -2,7 +2,6 @@
 
 #include <cstdlib>
 #include <algorithm>
-#include <iostream>
 
 namespace sv {
 
@@ -37,10 +36,6 @@ void Kernel::run_active_region(uint64_t target_time) {
 
         ScheduledProcess cur = sp;
         pq_.pop();
-
-        std::cerr << "[KERNEL] run proc at t=" << cur.time
-                  << " delta=" << cur.delta
-                  << " region=" << int(cur.region) << "\n";
 
         cur_delta_++;
         cur.proc.run(*this);
@@ -595,9 +590,30 @@ Value Kernel::eval_expr(const RtlExpr &e) {
 
         return Value(width, Logic4::LX);
     }
+
+    case RtlExprKind::BitSelect: {
+        // Evaluate base vector
+        Value base = eval_expr(*e.base);
+
+        // Evaluate index
+        Value idx_v = eval_expr(*e.index);
+        uint64_t idx = value_to_uint(idx_v);
+
+        // Out-of-range → return X (Option 1)
+        if (idx >= base.width()) {
+            Value out(1, Logic4::LX);
+            return out;
+        }
+
+        // Return 1-bit slice
+        Value out(1);
+        out.set(0, base.get(idx));
+        return out;
     }
 
-    return Value(1, Logic4::LX);
+    default:
+        return Value(1, Logic4::LX);
+    }
 }
 
 // ============================================================================
@@ -605,80 +621,106 @@ Value Kernel::eval_expr(const RtlExpr &e) {
 // ============================================================================
 
 void Kernel::drive_signal(const std::string &name, const Value &v, bool nba) {
+    // Non‑blocking: enqueue a process that will perform a blocking write later
     if (nba) {
-        Process p(
-            [this, name, v](Kernel &k) {
-                k.signals_[name] = v;
-            },
-            SchedRegion::NBA
+        nba_queue_.emplace_back(
+            Process(
+                [name, v](Kernel &k) {
+                    k.drive_signal(name, v, /*nba=*/false);
+                },
+                SchedRegion::NBA
+            )
         );
-        schedule_nba(std::move(p));
         return;
     }
 
-    auto it_old = signals_.find(name);
-    Value old_val(0);
-    bool had_old = false;
-    Logic4 old_bit = Logic4::LX;
-
-    if (it_old != signals_.end()) {
-        old_val = it_old->second;
-        had_old = true;
-        if (old_val.width() > 0) {
-            old_bit = old_val.get(0);
-        }
-    }
-
-    bool same = had_old && (old_val.width() == v.width());
-    if (same) {
-        for (std::size_t i = 0; i < v.width(); ++i) {
-            if (old_val.get(i) != v.get(i)) {
-                same = false;
-                break;
-            }
-        }
-    }
-    if (same) {
+    // Blocking write: update signal and trigger watchers
+    auto it = signals_.find(name);
+    if (it == signals_.end())
         return;
-    }
 
-    signals_[name] = v;
+    Value old = it->second;
+    it->second = v;
 
-    Logic4 new_bit = Logic4::LX;
-    if (v.width() > 0) {
-        new_bit = v.get(0);
-    }
+    auto get_bit0 = [](const Value &val) -> Logic4 {
+        if (val.width() == 0) return Logic4::LX;
+        return val.get(0);
+    };
 
-    bool is_posedge = (old_bit == Logic4::L0 && new_bit == Logic4::L1);
-    bool is_negedge = (old_bit == Logic4::L1 && new_bit == Logic4::L0);
+    Logic4 old0 = get_bit0(old);
+    Logic4 new0 = get_bit0(v);
 
-    auto it_lvl = level_watchers_.find(name);
-    if (it_lvl != level_watchers_.end()) {
-        for (Process *pp : it_lvl->second) {
-            if (!pp) continue;
-            schedule(*pp, 0, pp->region());
-        }
-    }
-
-    if (is_posedge) {
-        auto it_pe = posedge_watchers_.find(name);
-        if (it_pe != posedge_watchers_.end()) {
-            for (Process *pp : it_pe->second) {
-                if (!pp) continue;
-                schedule(*pp, 0, pp->region());
+    // Level‑sensitive watchers (on any change)
+    if (old0 != new0) {
+        auto lw = level_watchers_.find(name);
+        if (lw != level_watchers_.end()) {
+            for (auto *p : lw->second) {
+                if (p)
+                    schedule(*p, 0, p->region());
             }
         }
     }
 
-    if (is_negedge) {
-        auto it_ne = negedge_watchers_.find(name);
-        if (it_ne != negedge_watchers_.end()) {
-            for (Process *pp : it_ne->second) {
-                if (!pp) continue;
-                schedule(*pp, 0, pp->region());
+    // Posedge: treat X→1, 0→1, Z→1 all as posedge
+    if (new0 == Logic4::L1 && old0 != Logic4::L1) {
+        auto pw = posedge_watchers_.find(name);
+        if (pw != posedge_watchers_.end()) {
+            for (auto *p : pw->second) {
+                if (p)
+                    schedule(*p, 0, p->region());
             }
         }
     }
+
+    // Negedge: 1→0, 1→X, 1→Z
+    if (old0 == Logic4::L1 && new0 != Logic4::L1) {
+        auto nw = negedge_watchers_.find(name);
+        if (nw != negedge_watchers_.end()) {
+            for (auto *p : nw->second) {
+                if (p)
+                    schedule(*p, 0, p->region());
+            }
+        }
+    }
+}
+
+void Kernel::drive_signal(const RtlExpr &lhs_expr, const Value &rhs, bool nba) {
+    // Must be BitSelect
+    if (lhs_expr.kind != RtlExprKind::BitSelect)
+        return;
+
+    // Base must be a reference
+    const RtlExpr &base = *lhs_expr.base;
+    if (base.kind != RtlExprKind::Ref)
+        return;
+
+    std::string name = base.ref_name;
+
+    // Evaluate index
+    Value idx_v = eval_expr(*lhs_expr.index);
+    uint64_t idx = value_to_uint(idx_v);
+
+    // Lookup signal
+    auto it = signals_.find(name);
+    if (it == signals_.end())
+        return;
+
+    Value cur = it->second;
+
+    // Out-of-range → ignore write (Option 1)
+    if (idx >= cur.width())
+        return;
+
+    // Extract 1-bit RHS
+    Logic4 bit = Logic4::LX;
+    if (rhs.width() > 0)
+        bit = rhs.get(0);
+
+    // Update only that bit
+    cur.set(idx, bit);
+
+    // Delegate to whole-signal write
+    drive_signal(name, cur, nba);
 }
 
 // ============================================================================
@@ -718,6 +760,13 @@ void Kernel::register_expr_dependencies(const RtlExpr &e, Process *p) {
             register_expr_dependencies(*e.rhs, p);
         break;
 
+    case RtlExprKind::BitSelect:
+        if (e.base)
+            register_expr_dependencies(*e.base, p);
+        if (e.index)
+            register_expr_dependencies(*e.index, p);
+        break;
+
     default:
         break;
     }
@@ -737,7 +786,11 @@ void Kernel::exec_stmt(Thread &th) {
             case RtlStmtKind::BlockingAssign: {
                 if (s->rhs) {
                     Value v = eval_expr(*s->rhs);
-                    drive_signal(s->lhs_name, v, /*nba=*/false);
+
+                    if (s->lhs_expr)
+                        drive_signal(*s->lhs_expr, v, false);
+                    else
+                        drive_signal(s->lhs_name, v, false);
                 }
                 s = s->next;
                 break;
@@ -746,7 +799,11 @@ void Kernel::exec_stmt(Thread &th) {
             case RtlStmtKind::NonBlockingAssign: {
                 if (s->rhs) {
                     Value v = eval_expr(*s->rhs);
-                    drive_signal(s->lhs_name, v, /*nba=*/true);
+
+                    if (s->lhs_expr)
+                        drive_signal(*s->lhs_expr, v, true);
+                    else
+                        drive_signal(s->lhs_name, v, true);
                 }
                 s = s->next;
                 break;

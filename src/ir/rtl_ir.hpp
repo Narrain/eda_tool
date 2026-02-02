@@ -18,7 +18,8 @@ enum class RtlExprKind {
     Ref,
     Const,
     Unary,
-    Binary
+    Binary,
+    BitSelect        // support for r[i]
 };
 
 enum class RtlUnOp {
@@ -53,6 +54,11 @@ enum class RtlBinOp {
     Ashr
 };
 
+struct RtlExpr;
+
+// helper to deep‑clone an expression tree
+inline std::unique_ptr<RtlExpr> clone_expr(const std::unique_ptr<RtlExpr> &src);
+
 struct RtlExpr {
     RtlExprKind kind = RtlExprKind::Const;
 
@@ -71,23 +77,25 @@ struct RtlExpr {
     std::unique_ptr<RtlExpr> lhs;
     std::unique_ptr<RtlExpr> rhs;
 
+    // BitSelect: base[index]
+    std::unique_ptr<RtlExpr> base;
+    std::unique_ptr<RtlExpr> index;
+
     RtlExpr() = default;
     explicit RtlExpr(RtlExprKind k) : kind(k) {}
 
+    // deep copy
     RtlExpr(const RtlExpr &o)
         : kind(o.kind),
           ref_name(o.ref_name),
           const_literal(o.const_literal),
           un_op(o.un_op),
-          bin_op(o.bin_op)
-    {
-        if (o.un_operand)
-            un_operand = std::make_unique<RtlExpr>(*o.un_operand);
-        if (o.lhs)
-            lhs = std::make_unique<RtlExpr>(*o.lhs);
-        if (o.rhs)
-            rhs = std::make_unique<RtlExpr>(*o.rhs);
-    }
+          un_operand(clone_expr(o.un_operand)),
+          bin_op(o.bin_op),
+          lhs(clone_expr(o.lhs)),
+          rhs(clone_expr(o.rhs)),
+          base(clone_expr(o.base)),
+          index(clone_expr(o.index)) {}
 
     RtlExpr &operator=(const RtlExpr &o) {
         if (this == &o) return *this;
@@ -95,30 +103,24 @@ struct RtlExpr {
         ref_name      = o.ref_name;
         const_literal = o.const_literal;
         un_op         = o.un_op;
+        un_operand    = clone_expr(o.un_operand);
         bin_op        = o.bin_op;
-
-        if (o.un_operand)
-            un_operand = std::make_unique<RtlExpr>(*o.un_operand);
-        else
-            un_operand.reset();
-
-        if (o.lhs)
-            lhs = std::make_unique<RtlExpr>(*o.lhs);
-        else
-            lhs.reset();
-
-        if (o.rhs)
-            rhs = std::make_unique<RtlExpr>(*o.rhs);
-        else
-            rhs.reset();
-
+        lhs           = clone_expr(o.lhs);
+        rhs           = clone_expr(o.rhs);
+        base          = clone_expr(o.base);
+        index         = clone_expr(o.index);
         return *this;
     }
 
-    std::unique_ptr<RtlExpr> clone() const {
-        return std::make_unique<RtlExpr>(*this);
-    }
+    // default move
+    RtlExpr(RtlExpr &&) noexcept = default;
+    RtlExpr &operator=(RtlExpr &&) noexcept = default;
 };
+
+inline std::unique_ptr<RtlExpr> clone_expr(const std::unique_ptr<RtlExpr> &src) {
+    if (!src) return nullptr;
+    return std::make_unique<RtlExpr>(*src);
+}
 
 // ============================================================================
 // Statements
@@ -131,88 +133,85 @@ enum class RtlStmtKind {
     Finish
 };
 
-struct RtlStmt {
-    RtlStmtKind kind = RtlStmtKind::BlockingAssign;
-
-    std::string lhs_name;
-    std::unique_ptr<RtlExpr> rhs;
-
-    std::unique_ptr<RtlExpr> delay_expr;
-    RtlStmt *delay_stmt = nullptr;
-
-    RtlStmt *next = nullptr;
-
-    RtlStmt() = default;
-
-    RtlStmt(const RtlStmt &o)
-        : kind(o.kind),
-          lhs_name(o.lhs_name)
-    {
-        if (o.rhs)
-            rhs = std::make_unique<RtlExpr>(*o.rhs);
-        if (o.delay_expr)
-            delay_expr = std::make_unique<RtlExpr>(*o.delay_expr);
-
-        delay_stmt = nullptr;
-        next       = nullptr;
-    }
-
-    RtlStmt &operator=(const RtlStmt &o) {
-        if (this == &o) return *this;
-        kind     = o.kind;
-        lhs_name = o.lhs_name;
-
-        if (o.rhs)
-            rhs = std::make_unique<RtlExpr>(*o.rhs);
-        else
-            rhs.reset();
-
-        if (o.delay_expr)
-            delay_expr = std::make_unique<RtlExpr>(*o.delay_expr);
-        else
-            delay_expr.reset();
-
-        delay_stmt = nullptr;
-        next       = nullptr;
-        return *this;
-    }
-};
-
-// ============================================================================
-// Assigns
-// ============================================================================
-
 enum class RtlAssignKind {
     Continuous,
     Blocking,
     NonBlocking
 };
 
+struct RtlStmt {
+    RtlStmtKind kind = RtlStmtKind::BlockingAssign;
+
+    // LHS can be either a plain name or an expression (BitSelect)
+    std::string lhs_name;                 // whole‑net assignment
+    std::unique_ptr<RtlExpr> lhs_expr;    // bit‑select or other LHS expr
+
+    std::unique_ptr<RtlExpr> rhs;         // RHS expression
+    std::unique_ptr<RtlExpr> delay_expr;  // for #delay
+
+    RtlStmt *next = nullptr;
+
+    RtlStmt() = default;
+
+    // deep copy (do NOT copy next pointer; it will be rebuilt by RtlProcess)
+    RtlStmt(const RtlStmt &o)
+        : kind(o.kind),
+          lhs_name(o.lhs_name),
+          lhs_expr(clone_expr(o.lhs_expr)),
+          rhs(clone_expr(o.rhs)),
+          delay_expr(clone_expr(o.delay_expr)),
+          next(nullptr) {}
+
+    RtlStmt &operator=(const RtlStmt &o) {
+        if (this == &o) return *this;
+        kind       = o.kind;
+        lhs_name   = o.lhs_name;
+        lhs_expr   = clone_expr(o.lhs_expr);
+        rhs        = clone_expr(o.rhs);
+        delay_expr = clone_expr(o.delay_expr);
+        next       = nullptr; // rebuilt by owner
+        return *this;
+    }
+
+    RtlStmt(RtlStmt &&) noexcept = default;
+    RtlStmt &operator=(RtlStmt &&) noexcept = default;
+};
+
+// ============================================================================
+// Continuous assign
+// ============================================================================
+
 struct RtlAssign {
     RtlAssignKind kind = RtlAssignKind::Continuous;
-    std::string   lhs_name;
+    std::string lhs_name;
     std::unique_ptr<RtlExpr> rhs;
 
     RtlAssign() = default;
 
     RtlAssign(const RtlAssign &o)
         : kind(o.kind),
-          lhs_name(o.lhs_name)
-    {
-        if (o.rhs)
-            rhs = std::make_unique<RtlExpr>(*o.rhs);
-    }
+          lhs_name(o.lhs_name),
+          rhs(clone_expr(o.rhs)) {}
 
     RtlAssign &operator=(const RtlAssign &o) {
         if (this == &o) return *this;
         kind     = o.kind;
         lhs_name = o.lhs_name;
-        if (o.rhs)
-            rhs = std::make_unique<RtlExpr>(*o.rhs);
-        else
-            rhs.reset();
+        rhs      = clone_expr(o.rhs);
         return *this;
     }
+
+    RtlAssign(RtlAssign &&) noexcept = default;
+    RtlAssign &operator=(RtlAssign &&) noexcept = default;
+};
+
+// ============================================================================
+// Sensitivity
+// ============================================================================
+
+struct RtlSensitivity {
+    enum class Kind { Level, Posedge, Negedge } kind = Kind::Level;
+    std::string signal;
 };
 
 // ============================================================================
@@ -224,120 +223,83 @@ enum class RtlProcessKind {
     Initial
 };
 
-struct RtlSensitivity {
-    enum class Kind {
-        Level,
-        Posedge,
-        Negedge
-    };
-
-    Kind        kind   = Kind::Level;
-    std::string signal;
-};
-
-
 struct RtlProcess {
     RtlProcessKind kind = RtlProcessKind::Always;
 
-    std::vector<RtlAssign> assigns;
+    std::vector<RtlSensitivity> sensitivity;
 
+    // Procedural statements
     RtlStmt *first_stmt = nullptr;
     std::vector<std::unique_ptr<RtlStmt>> stmts;
 
-    std::vector<RtlSensitivity> sensitivity;
+    // For simple always blocks with only assigns
+    std::vector<RtlAssign> assigns;
 
     RtlProcess() = default;
 
+    // deep copy: clone stmts and rebuild first_stmt/next chain
     RtlProcess(const RtlProcess &o)
         : kind(o.kind),
-          assigns(o.assigns),
+          sensitivity(o.sensitivity),
           first_stmt(nullptr),
-          sensitivity(o.sensitivity)
-    {
-        stmts.clear();
+          assigns(o.assigns) {
+
+        // clone statements
         stmts.reserve(o.stmts.size());
         for (const auto &sp : o.stmts) {
-            if (sp)
+            if (sp) {
                 stmts.push_back(std::make_unique<RtlStmt>(*sp));
-            else
-                stmts.push_back(nullptr);
-        }
-
-        if (o.first_stmt) {
-            for (std::size_t i = 0; i < o.stmts.size(); ++i) {
-                if (o.stmts[i].get() == o.first_stmt) {
-                    first_stmt = stmts[i].get();
-                    break;
-                }
-            }
-        }
-
-        for (std::size_t i = 0; i < o.stmts.size(); ++i) {
-            const RtlStmt *orig = o.stmts[i].get();
-            RtlStmt *clone      = stmts[i].get();
-            if (!orig || !clone) continue;
-
-            if (orig->next) {
-                for (std::size_t j = 0; j < o.stmts.size(); ++j) {
-                    if (o.stmts[j].get() == orig->next) {
-                        clone->next = stmts[j].get();
-                        break;
-                    }
-                }
             } else {
-                clone->next = nullptr;
+                stmts.push_back(nullptr);
             }
+        }
 
-            clone->delay_stmt = nullptr;
+        // rebuild linear next chain and first_stmt if there are any stmts
+        if (!stmts.empty()) {
+            first_stmt = stmts[0].get();
+            for (std::size_t i = 0; i + 1 < stmts.size(); ++i) {
+                if (stmts[i])
+                    stmts[i]->next = stmts[i + 1].get();
+            }
+            if (stmts.back())
+                stmts.back()->next = nullptr;
         }
     }
 
     RtlProcess &operator=(const RtlProcess &o) {
         if (this == &o) return *this;
+
         kind        = o.kind;
-        assigns     = o.assigns;
         sensitivity = o.sensitivity;
+        assigns     = o.assigns;
 
         stmts.clear();
+        first_stmt = nullptr;
+
         stmts.reserve(o.stmts.size());
         for (const auto &sp : o.stmts) {
-            if (sp)
+            if (sp) {
                 stmts.push_back(std::make_unique<RtlStmt>(*sp));
-            else
-                stmts.push_back(nullptr);
-        }
-
-        first_stmt = nullptr;
-        if (o.first_stmt) {
-            for (std::size_t i = 0; i < o.stmts.size(); ++i) {
-                if (o.stmts[i].get() == o.first_stmt) {
-                    first_stmt = stmts[i].get();
-                    break;
-                }
-            }
-        }
-
-        for (std::size_t i = 0; i < o.stmts.size(); ++i) {
-            const RtlStmt *orig = o.stmts[i].get();
-            RtlStmt *clone      = stmts[i].get();
-            if (!orig || !clone) continue;
-
-            if (orig->next) {
-                for (std::size_t j = 0; j < o.stmts.size(); ++j) {
-                    if (o.stmts[j].get() == orig->next) {
-                        clone->next = stmts[j].get();
-                        break;
-                    }
-                }
             } else {
-                clone->next = nullptr;
+                stmts.push_back(nullptr);
             }
+        }
 
-            clone->delay_stmt = nullptr;
+        if (!stmts.empty()) {
+            first_stmt = stmts[0].get();
+            for (std::size_t i = 0; i + 1 < stmts.size(); ++i) {
+                if (stmts[i])
+                    stmts[i]->next = stmts[i + 1].get();
+            }
+            if (stmts.back())
+                stmts.back()->next = nullptr;
         }
 
         return *this;
     }
+
+    RtlProcess(RtlProcess &&) noexcept = default;
+    RtlProcess &operator=(RtlProcess &&) noexcept = default;
 };
 
 // ============================================================================
@@ -357,159 +319,61 @@ enum class RtlGateKind {
 
 struct RtlGate {
     RtlGateKind kind = RtlGateKind::And;
-    std::vector<std::string> inputs;
     std::string out;
-
-    RtlGate() = default;
-    RtlGate(const RtlGate &) = default;
-    RtlGate &operator=(const RtlGate &) = default;
+    std::vector<std::string> inputs;
 };
 
 // ============================================================================
-// Params, instances
+// Instances
 // ============================================================================
-
-struct RtlParam {
-    std::string name;
-
-    // Old style used by ir_builder: literal string
-    std::string value_str;
-
-    // Rich form: expression value (not currently used by ir_builder)
-    std::unique_ptr<RtlExpr> value;
-
-    RtlParam() = default;
-
-    RtlParam(const RtlParam &o)
-        : name(o.name),
-          value_str(o.value_str)
-    {
-        if (o.value)
-            value = std::make_unique<RtlExpr>(*o.value);
-    }
-
-    RtlParam &operator=(const RtlParam &o) {
-        if (this == &o) return *this;
-        name      = o.name;
-        value_str = o.value_str;
-        if (o.value)
-            value = std::make_unique<RtlExpr>(*o.value);
-        else
-            value.reset();
-        return *this;
-    }
-};
 
 struct RtlInstanceConn {
     std::string port_name;
-
-    // Old style used by ir_builder: just a signal name
     std::string signal_name;
-
-    // Rich form: expression connection (not currently used by ir_builder)
-    std::unique_ptr<RtlExpr> expr;
-
-    RtlInstanceConn() = default;
-
-    RtlInstanceConn(const RtlInstanceConn &o)
-        : port_name(o.port_name),
-          signal_name(o.signal_name)
-    {
-        if (o.expr)
-            expr = std::make_unique<RtlExpr>(*o.expr);
-    }
-
-    RtlInstanceConn &operator=(const RtlInstanceConn &o) {
-        if (this == &o) return *this;
-        port_name   = o.port_name;
-        signal_name = o.signal_name;
-        if (o.expr)
-            expr = std::make_unique<RtlExpr>(*o.expr);
-        else
-            expr.reset();
-        return *this;
-    }
 };
 
 struct RtlInstance {
     std::string module_name;
-
-    // Name as used by ir_builder
     std::string instance_name;
-
-    // Alternate name (kept for future use / compatibility)
-    std::string inst_name;
-
-    // Old style used by ir_builder
     std::vector<RtlInstanceConn> conns;
-
-    // Rich form (not currently used by ir_builder)
-    std::vector<RtlInstanceConn> connections;
-
-    RtlInstance() = default;
-
-    RtlInstance(const RtlInstance &o)
-        : module_name(o.module_name),
-          instance_name(o.instance_name),
-          inst_name(o.inst_name),
-          conns(o.conns),
-          connections(o.connections)
-    {}
-
-    RtlInstance &operator=(const RtlInstance &o) {
-        if (this == &o) return *this;
-        module_name  = o.module_name;
-        instance_name = o.instance_name;
-        inst_name     = o.inst_name;
-        conns         = o.conns;
-        connections   = o.connections;
-        return *this;
-    }
 };
 
 // ============================================================================
-// Nets, modules, design
+// Parameters
+// ============================================================================
+
+struct RtlParam {
+    std::string name;
+    std::string value_str;
+};
+
+// ============================================================================
+// Nets
 // ============================================================================
 
 struct RtlNet {
     std::string name;
-    DataType    type;   // from frontend/ast.hpp
+    DataType type;
 };
+
+// ============================================================================
+// Module
+// ============================================================================
 
 struct RtlModule {
     std::string name;
 
-    std::vector<RtlParam>    params;
-    std::vector<RtlNet>      nets;
-    std::vector<RtlAssign>   continuous_assigns;
-    std::vector<RtlProcess>  processes;
-    std::vector<RtlGate>     gates;
+    std::vector<RtlParam> params;
+    std::vector<RtlNet> nets;
+    std::vector<RtlAssign> continuous_assigns;
+    std::vector<RtlProcess> processes;
+    std::vector<RtlGate> gates;
     std::vector<RtlInstance> instances;
-
-    RtlModule() = default;
-
-    RtlModule(const RtlModule &o)
-        : name(o.name),
-          params(o.params),
-          nets(o.nets),
-          continuous_assigns(o.continuous_assigns),
-          processes(o.processes),
-          gates(o.gates),
-          instances(o.instances)
-    {}
-
-    RtlModule &operator=(const RtlModule &o) {
-        if (this == &o) return *this;
-        name               = o.name;
-        params             = o.params;
-        nets               = o.nets;
-        continuous_assigns = o.continuous_assigns;
-        processes          = o.processes;
-        gates              = o.gates;
-        instances          = o.instances;
-        return *this;
-    }
 };
+
+// ============================================================================
+// Design
+// ============================================================================
 
 struct RtlDesign {
     std::vector<RtlModule> modules;
